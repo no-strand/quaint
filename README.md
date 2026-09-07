@@ -1,21 +1,38 @@
-Quaint
+<div align="center">
 
-A lightweight viewer designed for reading manga and comics, with support for CBZ, CBR, EPUB, and PDF.
+# Quaint
 
-It can also be used as a general-purpose image viewer for individual images and folders.
+### A lightweight viewer for manga, comics and images
 
-Features
+**CBZ · CBR · EPUB · PDF · Images · Folders**
 
-Single-page, double-page, and continuous reading
+</div>
 
-Zoom, pan, rotation, and fullscreen
+---
 
-Image adjustments and filters
+## About
 
-Thumbnails, bookmarks, and favorites
+**Quaint** is a lightweight viewer designed primarily for reading **manga and comics**.
 
-Crop, magnifier, color picker, and image comparison
+It supports **CBZ, CBR, EPUB and PDF**, while also working as a fast and versatile **image viewer** for individual images and entire folders.
 
-Slideshow and batch export
+---
 
-Drag and drop support
+## Features
+
+- Single-page, double-page and continuous reading
+- Zoom, rotation and fullscreen
+- Image adjustments and filters
+- Thumbnails, bookmarks and favorites
+- Crop and image comparison
+- Slideshow
+- Batch export
+- Drag and drop support
+
+---
+
+<div align="center">
+
+**Simple. Fast. Focused on reading.**
+
+</div>
