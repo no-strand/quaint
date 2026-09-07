@@ -1,0 +1,410 @@
+/* Quaint — tema escuro moderno */
+
+* {
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-size: 13px;
+    color: #e6e6ec;
+}
+
+QMainWindow, QWidget#bottomBar {
+    background-color: #17171c;
+}
+
+QStackedWidget, QScrollArea {
+    /* A cor de fundo real da área de leitura é definida em tempo de
+       execução (guia Exibir > Fundo da página: claro/escuro). */
+    border: none;
+}
+
+QLabel#emptyLabel {
+    color: #6c6c7a;
+    font-size: 16px;
+}
+
+QLabel#pageLabel {
+    background-color: transparent;
+}
+
+/* --- Diálogos e janelas de mensagem ---
+   Sem esta regra, diálogos como "Sobre", avisos e o seletor de ajustes
+   herdam a cor de texto clara definida acima, mas usam o fundo branco
+   padrão do sistema — deixando o texto quase ilegível. Aqui garantimos
+   que toda janela secundária siga o mesmo tema escuro do programa. */
+QDialog, QMessageBox {
+    background-color: #1c1c24;
+    color: #e6e6ec;
+}
+QMessageBox QLabel, QDialog QLabel {
+    color: #e6e6ec;
+    background-color: transparent;
+}
+QToolTip {
+    background-color: #1c1c24;
+    color: #e6e6ec;
+    border: 1px solid #2a2a34;
+    padding: 4px 8px;
+}
+
+/* --- Barra de menu --- */
+QMenuBar {
+    background-color: #17171c;
+    border-bottom: 1px solid #26262e;
+    padding: 2px;
+}
+QMenuBar::item {
+    padding: 6px 10px;
+    background: transparent;
+    border-radius: 6px;
+}
+QMenuBar::item:selected {
+    background-color: #2a2a34;
+}
+QMenu {
+    background-color: #1c1c24;
+    border: 1px solid #2a2a34;
+    border-radius: 8px;
+    padding: 6px;
+}
+QMenu::item {
+    padding: 6px 24px 6px 12px;
+    border-radius: 6px;
+}
+QMenu::item:selected {
+    background-color: #7c5cff;
+    color: #ffffff;
+}
+QMenu::separator {
+    height: 1px;
+    background: #2a2a34;
+    margin: 6px 4px;
+}
+
+/* --- Botões de navegação (barra inferior, sem ícones — símbolos de texto) --- */
+QWidget#bottomBar QToolButton {
+    background: transparent;
+    border-radius: 8px;
+    padding: 2px;
+}
+QWidget#bottomBar QToolButton:hover {
+    background-color: #26262e;
+}
+QWidget#bottomBar QToolButton:pressed {
+    background-color: #7c5cff;
+    color: white;
+}
+QWidget#bottomBar QToolButton:disabled {
+    color: #4a4a56;
+}
+
+/* --- Diálogo de ajustes de exibição --- */
+QGroupBox {
+    border: 1px solid #2a2a34;
+    border-radius: 8px;
+    margin-top: 10px;
+    padding-top: 12px;
+    font-weight: 600;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 4px;
+}
+
+/* --- Botões --- */
+QPushButton {
+    background-color: #26262e;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-weight: 600;
+}
+QPushButton:hover {
+    background-color: #33333e;
+}
+QPushButton:pressed {
+    background-color: #7c5cff;
+}
+QPushButton:disabled {
+    color: #55555f;
+    background-color: #1c1c22;
+}
+
+/* --- Barra de progresso / slider --- */
+QSlider::groove:horizontal {
+    height: 6px;
+    background: #26262e;
+    border-radius: 3px;
+}
+QSlider::sub-page:horizontal {
+    background: #7c5cff;
+    border-radius: 3px;
+}
+QSlider::handle:horizontal {
+    background: #ffffff;
+    width: 16px;
+    height: 16px;
+    margin: -6px 0;
+    
+}
+QSlider::handle:horizontal:hover {
+    background: #cfc3ff;
+}
+
+/* --- ComboBox --- */
+QComboBox {
+    background-color: #26262e;
+    border: none;
+    border-radius: 8px;
+    padding: 6px 10px;
+    min-width: 140px;
+}
+QComboBox:hover {
+    background-color: #33333e;
+}
+QComboBox QAbstractItemView {
+    background-color: #1c1c24;
+    border: 1px solid #2a2a34;
+    selection-background-color: #7c5cff;
+    outline: none;
+}
+
+/* --- Listas (ex.: arquivos de metadados no diálogo de informações) ---
+   Sem isto, QListWidget usa o fundo branco padrão do sistema, e o texto
+   claro definido no seletor "*" acima fica quase ilegível sobre ele. */
+QListWidget {
+    background-color: #14141a;
+    border: 1px solid #2a2a34;
+    border-radius: 6px;
+    color: #e6e6ec;
+    outline: none;
+}
+QListWidget::item {
+    padding: 4px 6px;
+    border-radius: 4px;
+}
+QListWidget::item:selected {
+    background-color: #7c5cff;
+    color: #ffffff;
+}
+
+/* --- Campos de texto (ex.: diálogo "Adicionar tags") --- */
+QLineEdit, QPlainTextEdit, QTextEdit {
+    background-color: #14141a;
+    border: 1px solid #2a2a34;
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: #e6e6ec;
+    selection-background-color: #7c5cff;
+    selection-color: #ffffff;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus {
+    border: 1px solid #7c5cff;
+}
+
+/* --- Dock de miniaturas --- */
+QDockWidget {
+    color: #e6e6ec;
+    titlebar-close-icon: none;
+}
+QDockWidget::title {
+    background: #17171c;
+    padding: 8px;
+    border-bottom: 1px solid #26262e;
+}
+QListView#thumbnailPanel {
+    background-color: #101014;
+    color: #e6e6ec;
+    border: none;
+    outline: none;
+}
+QListView#thumbnailPanel::item {
+    background-color: transparent;
+    color: #e6e6ec;
+    border-radius: 6px;
+    padding: 4px;
+}
+QListView#thumbnailPanel::item:selected {
+    background-color: #7c5cff;
+    color: #ffffff;
+}
+QListView#thumbnailPanel::item:hover:!selected {
+    background-color: #1c1c24;
+}
+
+/* --- Janela de Sumário (grade de capas) --- */
+QListWidget#summaryPanel {
+    background-color: #101014;
+}
+QListWidget#summaryPanel::item {
+    border-radius: 6px;
+    padding: 4px;
+}
+QListWidget#summaryPanel::item:selected {
+    background-color: #7c5cff;
+}
+
+/* --- Barra de status --- */
+QStatusBar {
+    background-color: #17171c;
+    border-top: 1px solid #26262e;
+    color: #9d9dae;
+}
+
+/* --- Scrollbars --- */
+QScrollBar:vertical {
+    background: transparent;
+    width: 12px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical {
+    background: #34343f;
+    border-radius: 5px;
+    min-height: 24px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #7c5cff;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+QScrollBar:horizontal {
+    background: transparent;
+    height: 12px;
+    margin: 2px;
+}
+QScrollBar::handle:horizontal {
+    background: #34343f;
+    border-radius: 5px;
+    min-width: 24px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #7c5cff;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
+
+/* --- Tabelas / editor de atalhos --- */
+QTableWidget, QTableView {
+    background-color: #14141a;
+    alternate-background-color: #181820;
+    color: #e6e6ec;
+    gridline-color: #2f2f39;
+    border: 1px solid #2f2f39;
+    selection-background-color: #7c5cff;
+    selection-color: #ffffff;
+}
+QTableWidget::item, QTableView::item {
+    background-color: #14141a;
+    color: #e6e6ec;
+    padding: 4px;
+}
+QTableWidget::item:selected, QTableView::item:selected {
+    background-color: #7c5cff;
+    color: #ffffff;
+}
+QHeaderView::section {
+    background-color: #23232c;
+    color: #f2f2f6;
+    border: none;
+    border-right: 1px solid #343440;
+    border-bottom: 1px solid #343440;
+    padding: 7px;
+}
+QKeySequenceEdit {
+    background-color: #101014;
+    color: #f2f2f6;
+    border: 1px solid #3a3a47;
+    border-radius: 6px;
+    padding: 5px 8px;
+}
+
+/* --- Spin boxes (Batch Export etc.) --- */
+QSpinBox, QDoubleSpinBox {
+    background-color: #26262e;
+    color: #f2f2f6;
+    border: 1px solid #343440;
+    border-radius: 8px;
+    padding: 6px 9px;
+}
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+    background-color: #33333e;
+    border: none;
+    width: 18px;
+}
+
+/* --- Cartões do painel de marcadores --- */
+QScrollArea#bookmarkPanel, QWidget#bookmarkContent {
+    background-color: #101014;
+    border: none;
+}
+QFrame#bookmarkCard {
+    background-color: #17171c;
+    border: 1px solid #2a2a34;
+    border-radius: 8px;
+}
+QFrame#bookmarkCard:hover {
+    border-color: #565667;
+    background-color: #1d1d25;
+}
+QFrame#bookmarkImageHolder {
+    background-color: #0c0c10;
+    border: none;
+    border-radius: 6px;
+}
+QLabel#bookmarkPageLabel {
+    color: #e6e6ec;
+    font-weight: 600;
+}
+QLabel#bookmarkEmptyLabel {
+    color: #777786;
+    padding: 18px;
+}
+QToolButton#bookmarkRemoveButton {
+    background-color: rgba(15, 15, 20, 220);
+    border: 1px solid rgba(255, 255, 255, 65);
+    border-radius: 14px;
+    padding: 4px;
+}
+QToolButton#bookmarkRemoveButton:hover {
+    background-color: #b43d4b;
+    border-color: #e26a76;
+}
+
+/* --- Cartões do painel de favoritos --- */
+QScrollArea#favoritePanel, QWidget#favoriteContent {
+    background-color: #101014;
+    border: none;
+}
+QFrame#favoriteCard {
+    background-color: #17171c;
+    border: 1px solid #2a2a34;
+    border-radius: 8px;
+}
+QFrame#favoriteCard:hover {
+    border-color: #565667;
+    background-color: #1d1d25;
+}
+QFrame#favoriteImageHolder {
+    background-color: #0c0c10;
+    border: none;
+    border-radius: 6px;
+}
+QLabel#favoriteNameLabel {
+    color: #e6e6ec;
+    font-weight: 600;
+}
+QLabel#favoriteKindLabel {
+    color: #8f8f9f;
+}
+QToolButton#favoriteRemoveButton {
+    background-color: rgba(15, 15, 20, 220);
+    border: 1px solid rgba(255, 255, 255, 65);
+    border-radius: 14px;
+    padding: 4px;
+}
+QToolButton#favoriteRemoveButton:hover {
+    background-color: #b43d4b;
+    border-color: #e26a76;
+}
