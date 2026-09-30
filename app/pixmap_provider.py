@@ -18,7 +18,7 @@ import time
 from collections import OrderedDict
 
 from PIL import Image
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QImage, QPixmap, QTransform
 
 from app.animation_decode import (
@@ -514,6 +514,12 @@ class PixmapProvider(QObject):
         # token -> (tipo, task). Guardar a task permite promover um preload
         # ainda enfileirado para o pool foreground quando o usuário chega nela.
         self._pending = {}
+        # Alguns archives virtuais (EPUB textual) precisam usar objetos de
+        # layout/pintura do Qt. Esses pedidos são processados um por vez no
+        # event loop principal em vez de entrarem no QThreadPool. Isso evita
+        # reentrada do motor de fontes/layout e picos de memória no Windows.
+        self._gui_requests = OrderedDict()  # (index, generation) -> priority
+        self._gui_pump_scheduled = False
         self._generation = 0
         self.adjustments = normalize_adjustments()
         self.filter_name = "none"
@@ -599,6 +605,68 @@ class PixmapProvider(QObject):
         return out
 
     # ------------------------------------------------------------ loading --
+    def _requires_gui_thread(self, index):
+        checker = getattr(self.archive, "requires_gui_thread_for", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(int(index)))
+        except Exception:
+            return False
+
+    def _queue_gui_request(self, index, priority=100):
+        """Agenda uma única rasterização Qt por ciclo do event loop.
+
+        Não usa signal/worker intermediário: o resultado é entregue pelo mesmo
+        caminho de cache usado pelos carregamentos assíncronos. Pedidos iguais
+        são coalescidos pelo token (índice, geração).
+        """
+        if self._closed:
+            return
+        token = (int(index), self._generation)
+        if token in self._pending:
+            old = self._gui_requests.get(token)
+            if old is not None and int(priority) > int(old):
+                self._gui_requests[token] = int(priority)
+            return
+        self._pending[token] = ("gui", None)
+        self._gui_requests[token] = int(priority)
+        if not self._gui_pump_scheduled:
+            self._gui_pump_scheduled = True
+            QTimer.singleShot(0, self._process_gui_request)
+
+    def _process_gui_request(self):
+        self._gui_pump_scheduled = False
+        if self._closed:
+            self._gui_requests.clear()
+            return
+
+        # Prioriza a página central/solicitada pelo usuário. Uma única página é
+        # pintada por tick para manter a interface responsiva e impedir rajadas
+        # de vários QTextDocument/QPainter simultâneos.
+        while self._gui_requests:
+            token = max(self._gui_requests, key=lambda key: self._gui_requests[key])
+            self._gui_requests.pop(token, None)
+            index, generation = token
+            pending = self._pending.get(token)
+            if pending is None or pending[0] != "gui":
+                continue
+            if generation != self._generation:
+                self._pending.pop(token, None)
+                continue
+            try:
+                img = self.archive.load_image(index, self.max_dim)
+                qimg = _LoadTask._pil_to_qimage(img)
+            except Exception as exc:  # noqa: BLE001
+                self._on_failed(index, str(exc), generation)
+            else:
+                self._on_done(index, qimg, generation)
+            break
+
+        if self._gui_requests and not self._closed:
+            self._gui_pump_scheduled = True
+            QTimer.singleShot(0, self._process_gui_request)
+
     def get(self, index, priority=100):
         """Retorna a página do cache ou inicia seu carregamento em alta prioridade."""
         if self._closed:
@@ -617,6 +685,13 @@ class PixmapProvider(QObject):
         if hasattr(self.archive, "is_text_page") and self.archive.is_text_page(index):
             return
         if index in self.cache:
+            return
+        # Páginas textuais do EPUB usam QTextDocument e são deliberadamente
+        # excluídas do prefetch em worker. Só páginas realmente pedidas pela
+        # viewport entram na fila GUI sequencial.
+        if self._requires_gui_thread(index):
+            if foreground:
+                self._queue_gui_request(index, priority=priority)
             return
         token = (int(index), self._generation)
         pending = self._pending.get(token)
@@ -663,19 +738,48 @@ class PixmapProvider(QObject):
         if index not in self._animation_started:
             self.pixmap_ready.emit(index, self._display_pixmap(index, pix))
 
-    def _cancel_stale_prefetch(self, keep_indices):
-        """Remove da fila preloads antigos após saltos rápidos de página."""
+    def _cancel_stale_requests(self, keep_indices, kinds=("prefetch",)):
+        """Cancela trabalho ainda enfileirado que já não interessa à view.
+
+        QRunnable que já começou não é interrompido; apenas itens ainda na fila
+        são retirados. Assim saltos rápidos de página/miniaturas não deixam uma
+        cauda de decodes caros competindo com o conteúdo que acabou de ficar
+        visível.
+        """
         keep = {int(i) for i in keep_indices}
+        wanted_kinds = set(kinds)
         for token, pending in list(self._pending.items()):
             kind, task = pending
-            if kind != "prefetch" or int(token[0]) in keep:
+            if kind not in wanted_kinds or int(token[0]) in keep:
                 continue
+            if kind == "gui":
+                self._gui_requests.pop(token, None)
+                self._pending.pop(token, None)
+                continue
+            pool = self.pool if kind == "foreground" else self.prefetch_pool
             try:
-                removed = self.prefetch_pool.tryTake(task)
+                removed = pool.tryTake(task)
             except Exception:
                 removed = False
             if removed:
                 self._pending.pop(token, None)
+
+    def _cancel_stale_prefetch(self, keep_indices):
+        """Compatibilidade: remove apenas preloads antigos."""
+        self._cancel_stale_requests(keep_indices, kinds=("prefetch",))
+
+    def retain_indices(self, indices, *, include_prefetch=True,
+                       include_foreground=True, include_gui=True):
+        """Mantém na fila apenas pedidos ainda relevantes para a view atual."""
+        kinds = []
+        if include_prefetch:
+            kinds.append("prefetch")
+        if include_foreground:
+            kinds.append("foreground")
+        if include_gui:
+            kinds.append("gui")
+        if kinds:
+            self._cancel_stale_requests(indices, kinds=tuple(kinds))
 
     def preload_around(self, index, radius=4, backward=None):
         """Pré-carrega primeiro as próximas páginas e depois as anteriores.
@@ -706,9 +810,24 @@ class PixmapProvider(QObject):
                 self._request(i, priority=max(1, 20 - distance * 3), foreground=False)
 
     def preload_indices(self, indices, base_priority=35):
-        """Pré-carrega uma sequência explícita, útil no modo contínuo."""
+        """Pré-carrega uma sequência explícita, útil no modo contínuo.
+
+        Para archives com páginas que exigem GUI thread, esta chamada também
+        funciona como sinal de visibilidade: pedidos textuais que já saíram da
+        janela são descartados antes de serem rasterizados.
+        """
+        indices = [int(index) for index in indices]
+        if self._gui_requests:
+            keep = set(indices)
+            for token in list(self._gui_requests):
+                if int(token[0]) in keep:
+                    continue
+                self._gui_requests.pop(token, None)
+                pending = self._pending.get(token)
+                if pending is not None and pending[0] == "gui":
+                    self._pending.pop(token, None)
         for pos, index in enumerate(indices):
-            self._request(int(index), priority=max(1, int(base_priority) - pos), foreground=False)
+            self._request(index, priority=max(1, int(base_priority) - pos), foreground=False)
 
     def full_res(self, index, callback, *, max_dim=None, as_qimage=False):
         """Carrega uma página sem bloquear a UI e entrega na thread gráfica.
@@ -981,6 +1100,8 @@ class PixmapProvider(QObject):
         except Exception:
             pass
         self._pending.clear()
+        self._gui_requests.clear()
+        self._gui_pump_scheduled = False
         # Não apagamos à força bridges cujo QRunnable já está executando; eles
         # permanecem filhos deste provider até o sinal final e ignoram o
         # callback porque ``_closed`` já está ativo.

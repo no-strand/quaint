@@ -6,7 +6,7 @@ import imageio.v2 as imageio
 import numpy as np
 from PIL import Image
 
-from app.archive import ComicArchive, STANDALONE_IMAGE_EXTS
+from app.archive import ComicArchive, STANDALONE_IMAGE_EXTS, VIDEO_EXTS
 from app.save_helpers import (
     READABLE_IMAGE_EXTS,
     ensure_extension,
@@ -24,12 +24,16 @@ def _make_still(path: Path, fmt: str):
 
 
 def main():
-    expected = {
+    expected_images = set(STANDALONE_IMAGE_EXTS)
+    pillow_images = {
         ".jpg", ".jpeg", ".jfif", ".png", ".webp", ".gif",
-        ".tif", ".tiff", ".bmp", ".ico", ".webm",
+        ".tif", ".tiff", ".bmp", ".ico",
     }
-    assert expected <= STANDALONE_IMAGE_EXTS
-    assert expected == READABLE_IMAGE_EXTS
+    expected_save = pillow_images | {".webm"}
+    # WEBM continua disponível como formato de exportação animada, mas na
+    # abertura passa pelo player dedicado de vídeo.
+    assert expected_save == READABLE_IMAGE_EXTS
+    assert ".webm" in VIDEO_EXTS and ".webm" not in STANDALONE_IMAGE_EXTS
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -58,7 +62,8 @@ def main():
             archive.close()
         print("Imagens avulsas Pillow: OK")
 
-        # WEBM: um quadro deve ser exposto como uma imagem/página única.
+        # WEBM: agora deve ser roteado para o player, sem decodificar um
+        # quadro durante a indexação/abertura do ComicArchive.
         webm = root / "entrada.webm"
         frame = np.zeros((64, 64, 3), dtype=np.uint8)
         frame[:, :, 1] = 180
@@ -66,16 +71,15 @@ def main():
         writer.append_data(frame)
         writer.close()
         archive = ComicArchive(webm)
-        assert archive.kind == "image" and archive.count() == 1
-        with Image.open(io.BytesIO(archive.read_bytes(0))) as check:
-            check.load()
-            assert check.size == (64, 64)
+        assert archive.kind == "video" and archive.count() == 1
+        assert not archive.animation_candidate(0)
+        assert archive.page_size(0) == (0, 0)
         archive.close()
-        print("WEBM como imagem de um quadro: OK")
+        print("WEBM roteado para vídeo sem decode antecipado: OK")
 
-        # Conversão de saída para os mesmos formatos de leitura.
+        # Conversão de saída continua aceitando WEBM como exportação.
         source = Image.new("RGBA", (64, 64), (200, 80, 40, 220))
-        for ext in sorted(expected):
+        for ext in sorted(expected_save):
             target = root / f"saida{ext}"
             save_converted_image(source, target)
             assert target.exists() and target.stat().st_size > 0
@@ -97,19 +101,22 @@ def main():
     assert "WEBM (*.webm)" in image_save_filter()
 
     image_group = FILE_TYPE_GROUPS["images"]["extensions"]
-    assert set(image_group) == expected
+    video_group = FILE_TYPE_GROUPS["videos"]["extensions"]
+    assert set(image_group) == expected_images
+    assert set(video_group) == VIDEO_EXTS
 
     installer = Path(__file__).resolve().parents[1] / "build" / "installer.iss"
     installer_text = installer.read_text(encoding="utf-8")
     assert 'Name: "associateimages"' in installer_text
-    for ext in expected:
+    for ext in expected_images | VIDEO_EXTS:
         assert f'Software\\Classes\\{ext}' in installer_text
 
     reader_source = (Path(__file__).resolve().parents[1] / "app" / "reader_window.py").read_text(encoding="utf-8")
     assert 'self.archive.kind == "image"' in reader_source
-    assert 'tr("status.image_single_only")' in reader_source
+    assert 'self.archive.kind == "video"' in reader_source
+    assert '"status.video_single_only"' in reader_source
 
-    print("Suporte a imagens avulsas/associação: OK")
+    print("Suporte a imagens/vídeos avulsos + associações: OK")
 
 
 if __name__ == "__main__":

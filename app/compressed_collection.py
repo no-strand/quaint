@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 from PIL import Image
 
 from app.archive import (
-    ArchiveError, ComicArchive, STANDALONE_IMAGE_EXTS, _ZipReaderPool, natural_key,
+    ArchiveError, ComicArchive, STANDALONE_IMAGE_EXTS, VIDEO_EXTS, _ZipReaderPool, natural_key,
 )
 from app.animation_decode import ANIMATION_CANDIDATE_EXTS
 from app.i18n import tr
@@ -54,7 +54,8 @@ def _py7zr_module():
 
 COMIC_MEMBER_EXTS = {".cbz", ".cbr"}
 IMAGE_MEMBER_EXTS = set(STANDALONE_IMAGE_EXTS)
-SUPPORTED_MEMBER_EXTS = COMIC_MEMBER_EXTS | IMAGE_MEMBER_EXTS
+VIDEO_MEMBER_EXTS = set(VIDEO_EXTS)
+SUPPORTED_MEMBER_EXTS = COMIC_MEMBER_EXTS | IMAGE_MEMBER_EXTS | VIDEO_MEMBER_EXTS
 CONTAINER_SUFFIXES = (
     ".zip", ".rar", ".7z", ".tar", ".tgz", ".tar.gz", ".tar.bz2", ".tbz2",
     ".tar.xz", ".txz",
@@ -138,6 +139,8 @@ class CompressedComicCollection:
             kind = "comic"
         elif suffix in IMAGE_MEMBER_EXTS:
             kind = "image"
+        elif suffix in VIDEO_MEMBER_EXTS:
+            kind = "video"
         elif is_container_path(safe):
             kind = "archive"
         else:
@@ -285,9 +288,28 @@ class CompressedComicCollection:
     def member_is_image(self, index: int) -> bool:
         return self.member_kind(index) == "image"
 
+    def video_thumbnail_path(self, index: int):
+        """Caminho físico já materializado de um vídeo, sem extrair por thumb.
+
+        Em compactados, gerar dezenas de arquivos temporários apenas para o
+        painel de miniaturas prejudicaria desempenho e uso de disco.  Portanto
+        só devolvemos o caminho quando o membro já foi materializado pela
+        própria navegação.
+        """
+        index = int(index)
+        if self.member_kind(index) != "video":
+            return None
+        with self._lock:
+            path = self._materialized.get(index)
+        return path if path is not None and Path(path).is_file() else None
+
     def image_member_indices(self):
         """Índices das imagens avulsas da coleção, em ordem natural."""
         return [i for i, item in enumerate(self._members) if item[2] == "image"]
+
+    def media_member_indices(self):
+        """Índices de imagens e vídeos avulsos para o painel de miniaturas."""
+        return [i for i, item in enumerate(self._members) if item[2] in ("image", "video")]
 
     def has_non_image_members(self) -> bool:
         return any(item[2] != "image" for item in self._members)
@@ -431,7 +453,7 @@ class CompressedComicCollection:
                 return
             if not (0 <= index < len(self._members)):
                 return
-            if self.member_kind(index) not in ("image", "archive"):
+            if self.member_kind(index) not in ("image", "video", "archive"):
                 return
             path = self._materialized.pop(index, None)
         if path is not None:
@@ -525,6 +547,8 @@ class DirectoryComicCollection:
                             kind = "comic"
                         elif suffix in IMAGE_MEMBER_EXTS:
                             kind = "image"
+                        elif suffix in VIDEO_MEMBER_EXTS:
+                            kind = "video"
                         elif is_container_path(name):
                             kind = "archive"
                         else:
@@ -556,8 +580,18 @@ class DirectoryComicCollection:
     def member_is_image(self, index):
         return self.member_kind(index) == "image"
 
+    def video_thumbnail_path(self, index):
+        index = int(index)
+        if self.member_kind(index) != "video":
+            return None
+        path = self.member_path(index)
+        return path if Path(path).is_file() else None
+
     def image_member_indices(self):
         return [i for i, item in enumerate(self._members) if item[2] == "image"]
+
+    def media_member_indices(self):
+        return [i for i, item in enumerate(self._members) if item[2] in ("image", "video")]
 
     def has_non_image_members(self):
         return any(item[2] != "image" for item in self._members)
@@ -627,21 +661,25 @@ class DirectoryComicCollection:
         return self.count()
 
 
-class CollectionImageGroupArchive:
-    """Visão virtual somente das imagens avulsas da coleção para miniaturas."""
+class CollectionMediaGroupArchive:
+    """Visão virtual de imagens/vídeos avulsos da coleção para miniaturas."""
 
-    kind = "collection_images"
+    kind = "collection_media"
 
     def __init__(self, collection):
         self.collection = collection
         self.path = collection.path
-        self.member_indices = collection.image_member_indices()
+        self.member_indices = collection.media_member_indices()
 
     def count(self):
         return len(self.member_indices)
 
     def is_text_page(self, _index):
         return False
+
+    def is_video_page(self, index):
+        member = self.member_indices[int(index)]
+        return self.collection.member_kind(member) == "video"
 
     def has_text_pages(self):
         return False
@@ -652,8 +690,16 @@ class CollectionImageGroupArchive:
     def page_suffix(self, index):
         return Path(self.page_name(index)).suffix.lower()
 
+    def video_thumbnail_path(self, index):
+        member = self.member_indices[int(index)]
+        getter = getattr(self.collection, "video_thumbnail_path", None)
+        return getter(member) if getter is not None else None
+
     def load_image(self, index, max_dim=None):
-        return self.collection.load_member_image(self.member_indices[int(index)], max_dim)
+        member = self.member_indices[int(index)]
+        if self.collection.member_kind(member) == "video":
+            raise ArchiveError(tr("error.video_no_image"))
+        return self.collection.load_member_image(member, max_dim)
 
     def animation_candidate(self, index):
         return self.page_suffix(index) in ANIMATION_CANDIDATE_EXTS
@@ -663,6 +709,10 @@ class CollectionImageGroupArchive:
 
     def close(self):
         pass
+
+
+# Compatibilidade com testes/extensões antigas que importavam o nome anterior.
+CollectionImageGroupArchive = CollectionMediaGroupArchive
 
 
 class ContainerImageArchive:

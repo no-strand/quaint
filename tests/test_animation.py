@@ -8,7 +8,7 @@ from PIL import Image
 
 from app.animation_decode import iter_pillow_frames, iter_webm_frames
 from app.archive import ComicArchive
-from app.compressed_collection import CompressedComicCollection
+from app.compressed_collection import CompressedComicCollection, DirectoryComicCollection
 
 
 class AnimationTests(unittest.TestCase):
@@ -119,7 +119,31 @@ class AnimationTests(unittest.TestCase):
             finally:
                 arc.close()
 
-    def test_webm_in_image_folder_uses_first_frame_and_streams(self):
+    def test_webm_in_folder_is_classified_as_video_without_image_decode(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            webm = root / "clip.webm"
+            # O índice precisa reconhecer o vídeo só pelo nome/extensão. O
+            # arquivo pode estar vazio porque nenhuma miniatura/frame deve ser
+            # decodificado nesta etapa.
+            webm.touch()
+            collection = DirectoryComicCollection(root)
+            try:
+                self.assertEqual(collection.count(), 1)
+                self.assertEqual(collection.member_kind(0), "video")
+                self.assertEqual(collection.media_member_indices(), [0])
+            finally:
+                collection.close()
+
+            arc = ComicArchive(webm)
+            try:
+                self.assertEqual(arc.kind, "video")
+                self.assertFalse(arc.animation_candidate(0))
+                self.assertEqual(arc.page_size(0), (0, 0))
+            finally:
+                arc.close()
+
+    def test_webm_decoder_remains_available_for_export_utility(self):
         try:
             import imageio.v2 as imageio
             import imageio_ffmpeg  # noqa: F401
@@ -127,32 +151,22 @@ class AnimationTests(unittest.TestCase):
             self.skipTest("imageio-ffmpeg não disponível")
 
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            webm = root / "clip.webm"
+            webm = Path(td) / "clip.webm"
             arrays = []
             for value in (20, 100, 220):
                 arr = np.zeros((64, 64, 3), dtype=np.uint8)
                 arr[..., 0] = value
                 arrays.append(arr)
             imageio.mimsave(str(webm), arrays, fps=5, codec="libvpx-vp9")
+            streamed = []
+            for frame, delay in iter_webm_frames(webm, max_dim=40):
+                streamed.append((frame.size, delay))
+                if len(streamed) == 3:
+                    break
+            self.assertEqual(len(streamed), 3)
+            self.assertTrue(all(max(size) <= 40 for size, _ in streamed))
+            self.assertTrue(all(delay >= 20 for _, delay in streamed))
 
-            arc = ComicArchive(root)
-            try:
-                self.assertEqual(arc.count(), 1)
-                self.assertEqual(arc.page_suffix(0), ".webm")
-                self.assertTrue(arc.animation_candidate(0))
-                first = arc.load_image(0, max_dim=48)
-                self.assertLessEqual(max(first.size), 48)
-                streamed = []
-                for frame, delay in iter_webm_frames(webm, max_dim=40):
-                    streamed.append((frame.size, delay))
-                    if len(streamed) == 3:
-                        break
-                self.assertEqual(len(streamed), 3)
-                self.assertTrue(all(max(size) <= 40 for size, _ in streamed))
-                self.assertTrue(all(delay >= 20 for _, delay in streamed))
-            finally:
-                arc.close()
 
 
 if __name__ == "__main__":

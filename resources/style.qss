@@ -45,6 +45,41 @@ QToolTip {
     padding: 4px 8px;
 }
 
+
+/* --- Estado desabilitado global ---
+   Toda opção indisponível permanece visível, mas usa texto cinza para
+   comunicar claramente que não pode ser acionada no contexto atual. */
+*:disabled {
+    color: #686875;
+}
+QMenu::item:disabled,
+QMenuBar::item:disabled {
+    color: #686875;
+    background: transparent;
+}
+QMenu::item:disabled:selected,
+QMenuBar::item:disabled:selected {
+    color: #686875;
+    background: transparent;
+}
+QAbstractItemView::item:disabled {
+    color: #686875;
+}
+QComboBox:disabled,
+QLineEdit:disabled,
+QPlainTextEdit:disabled,
+QTextEdit:disabled,
+QSpinBox:disabled,
+QDoubleSpinBox:disabled,
+QCheckBox:disabled,
+QRadioButton:disabled,
+QLabel:disabled,
+QGroupBox:disabled,
+QToolButton:disabled,
+QPushButton:disabled {
+    color: #686875;
+}
+
 /* --- Barra de menu --- */
 QMenuBar {
     background-color: #17171c;
@@ -407,4 +442,32 @@ QToolButton#favoriteRemoveButton {
 QToolButton#favoriteRemoveButton:hover {
     background-color: #b43d4b;
     border-color: #e26a76;
+}
+
+/* Player de vídeo: superfície preta e controles compactos, sem carregar skins
+   ou recursos gráficos externos. */
+QVideoWidget#videoSurface {
+    background: #000000;
+}
+QWidget#videoControls {
+    background: #15151b;
+    border-top: 1px solid #2b2b35;
+}
+QWidget#videoControls QLabel {
+    color: #d9d9e2;
+}
+QWidget#videoControls QToolButton {
+    min-width: 30px;
+    min-height: 26px;
+}
+QToolButton#videoPlayButton, QToolButton#videoAudioButton {
+    background: #eeeeee;
+    border: 1px solid #d8d8dc;
+    border-radius: 6px;
+}
+QToolButton#videoPlayButton:hover, QToolButton#videoAudioButton:hover {
+    background: #ffffff;
+}
+QToolButton#videoPlayButton:pressed, QToolButton#videoAudioButton:pressed {
+    background: #dcdce2;
 }

@@ -23,6 +23,7 @@ from app.image_format_support import ensure_pillow_codec
 from app.index_cache import load_index, save_index_async
 from app.animation_decode import ANIMATION_CANDIDATE_EXTS
 from app.i18n import tr
+from app.format_defs import VIDEO_EXTS
 
 
 
@@ -83,7 +84,7 @@ IMG_EXTS = {
     ".tif", ".tiff", ".ico", ".avif", ".heic", ".heif", ".jxl",
     ".svg", ".svgz",
 }
-STANDALONE_IMAGE_EXTS = IMG_EXTS | {".webm"}
+STANDALONE_IMAGE_EXTS = set(IMG_EXTS)
 PAGE_MEDIA_EXTS = STANDALONE_IMAGE_EXTS
 FOLDER_MEDIA_EXTS = PAGE_MEDIA_EXTS
 METADATA_EXTS = {".json", ".txt"}
@@ -91,6 +92,7 @@ SUPPORTED_FILE_EXTS = {
     ".cbz", ".cbr", ".pdf", ".epub",
     ".zip", ".rar", ".7z", ".tar", ".tgz", ".tbz2", ".txz",
     *STANDALONE_IMAGE_EXTS,
+    *VIDEO_EXTS,
 }
 
 TAG_KEYS = {
@@ -368,7 +370,7 @@ class ComicArchive:
         self._preindexed_directory_pages = (
             list(directory_pages) if directory_pages is not None else None
         )
-        self.kind = None  # zip | rar | dir | pdf | epub | image
+        self.kind = None  # zip | rar | dir | pdf | epub | image | video
         self._zip = None
         self._zip_pool = None
         self._rar = None
@@ -387,7 +389,26 @@ class ComicArchive:
         self._raw_cache_limit = 32 * 1024 * 1024
         self._raw_inflight = {}
         self._zip_names = None
+        # Dimensões são consultadas repetidamente por views, ferramentas e
+        # diálogos. Guardar somente algumas centenas de tuplas evita reabrir
+        # páginas PDF ou reler cabeçalhos compactados sem prender pixels.
+        self._page_size_cache = OrderedDict()
+        self._page_size_cache_limit = 512
+        # HTML preparado de EPUB pode conter imagens embutidas em base64 e
+        # crescer bastante. Um LRU por quantidade + bytes impede que percorrer
+        # um livro inteiro mantenha todos os capítulos renderizáveis na RAM.
+        self._epub_html_cache = OrderedDict()
+        self._epub_html_cache_bytes = 0
+        self._epub_html_cache_entries = 6
+        self._epub_html_cache_limit = 16 * 1024 * 1024
         self._open()
+        # PDF nunca usa bytes brutos no caminho normal de exibição. Pastas e
+        # imagens avulsas também leem diretamente do arquivo; reservar 32 MB
+        # nesses casos só aumentaria o teto de memória de operações auxiliares.
+        if self.kind == "pdf":
+            self._raw_cache_limit = 0
+        elif self.kind in ("dir", "image"):
+            self._raw_cache_limit = 8 * 1024 * 1024
 
     # -------------------------------------------------------------- Abrir --
     def _open(self):
@@ -434,6 +455,8 @@ class ComicArchive:
             self._open_epub()
         elif suffix in STANDALONE_IMAGE_EXTS:
             self._open_single_image()
+        elif suffix in VIDEO_EXTS:
+            self._open_video()
         elif suffix == ".zip":
             raise ArchiveError(tr("error.zip_collection_layer"))
         elif suffix == ".cbz":
@@ -600,11 +623,18 @@ class ComicArchive:
                     return 0, 0
             return 0, 0
 
+
+    def _open_video(self):
+        """Register one video lazily; QtMultimedia opens it only on playback."""
+        self.kind = "video"
+        self.pages = [self.path.name]
+        self._raw_cache_limit = 0
+
     def _open_single_image(self):
         """Abre uma imagem avulsa como uma única página.
 
-        WebM é tratado como imagem pelo leitor a pedido do usuário. A abertura
-        é lazy: o FFmpeg só é iniciado quando a página precisa aparecer.
+        Formatos de vídeo, incluindo WebM, são roteados para o player dedicado
+        e portanto não passam por este pipeline de imagem.
         """
         suffix = self.path.suffix.lower()
         if suffix == ".webm":
@@ -702,14 +732,48 @@ class ComicArchive:
         self._pdf_pool = _PdfReaderPool(self.path, self._pdf, max_handles=3)
 
     def _open_epub(self):
-        BeautifulSoup = _beautiful_soup()
-        if BeautifulSoup is None:
-            raise ArchiveError(tr("error.epub_support"))
         try:
             self._zip = zipfile.ZipFile(self.path, "r")
-            self._zip_names = set(self._zip.namelist())
         except zipfile.BadZipFile as e:
             raise ArchiveError(tr("error.epub_invalid", error=e)) from e
+
+        # Reaberturas de EPUB não precisam reler e parsear todos os XHTML do
+        # spine. O índice persiste somente metadados leves (texto/imagem +
+        # caminho), e a assinatura do cache já inclui mtime/tamanho do EPUB.
+        cached_pages = load_index(self.path, "epub_pages")
+        if cached_pages is not None:
+            normalized = []
+            valid = True
+            for item in cached_pages:
+                if not isinstance(item, dict):
+                    valid = False
+                    break
+                kind = item.get("type")
+                if kind == "text" and item.get("source"):
+                    normalized.append({"type": "text", "source": str(item["source"])})
+                elif kind == "image" and item.get("path"):
+                    path = str(item["path"])
+                    normalized.append({
+                        "type": "image",
+                        "path": path,
+                        "source": str(item.get("source") or path),
+                    })
+                else:
+                    valid = False
+                    break
+            if valid and normalized:
+                self.kind = "epub"
+                self.pages = normalized
+                self._has_text_pages = any(p["type"] == "text" for p in normalized)
+                self._zip_pool = _ZipReaderPool(self.path, self._zip, max_handles=3)
+                # O set de todos os nomes só é necessário durante a indexação.
+                self._zip_names = None
+                return
+
+        # Só materialize a tabela completa de nomes quando o índice persistente
+        # não existir. EPUBs grandes podem conter milhares de recursos e esse set
+        # era recriado em toda reabertura, mesmo sem ser necessário.
+        self._zip_names = set(self._zip.namelist())
 
         try:
             container_xml = self._zip.read("META-INF/container.xml")
@@ -782,60 +846,125 @@ class ComicArchive:
             self._zip = None
             raise ArchiveError(tr("error.epub_no_content"))
 
+        # Nunca retenha o XHTML bruto de todos os capítulos. A classificação
+        # do spine é persistida, e o conteúdo de um capítulo textual passa a
+        # ser lido apenas quando ele realmente for exibido/miniaturizado.
+        pages = [
+            ({"type": "text", "source": str(p.get("source", ""))}
+             if p.get("type") == "text" else
+             {"type": "image", "path": str(p.get("path", "")),
+              "source": str(p.get("source") or p.get("path", ""))})
+            for p in pages
+        ]
         self.kind = "epub"
         self.pages = pages
         self._has_text_pages = any(p.get("type") == "text" for p in pages)
-        self._zip_pool = _ZipReaderPool(self.path, self._zip, max_handles=2)
+        self._zip_pool = _ZipReaderPool(self.path, self._zip, max_handles=3)
+        save_index_async(self.path, "epub_pages", pages)
+        self._zip_names = None
 
     def _parse_epub_document(self, item_path, raw):
-        BeautifulSoup = _beautiful_soup()
-        if BeautifulSoup is None:
-            raise ArchiveError(tr("error.epub_support"))
-        soup = BeautifulSoup(raw, "html.parser")
-        body = soup.body or soup
-        for tag in body.find_all(["script", "style", "noscript", "form"]):
-            tag.decompose()
+        """Classifica um XHTML do spine com caminho rápido XML + fallback HTML.
 
+        EPUB é XHTML por especificação; ElementTree é muito mais leve que criar
+        uma árvore BeautifulSoup para cada capítulo. Arquivos tolerados mas não
+        bem-formados continuam funcionando pelo fallback antigo.
+        """
         image_refs = []
-        for img in body.find_all("img"):
-            src = img.get("src")
-            if src:
-                resolved = _resolve_epub_path(item_path, src)
-                if resolved in self._zip_names and Path(resolved).suffix.lower() in IMG_EXTS:
-                    image_refs.append(resolved)
-        # EPUBs de mangá às vezes usam SVG <image href=...> como página.
-        for svg_img in body.find_all("image"):
-            src = svg_img.get("href") or svg_img.get("xlink:href")
-            if src:
-                resolved = _resolve_epub_path(item_path, src)
-                if resolved in self._zip_names and Path(resolved).suffix.lower() in IMG_EXTS:
-                    image_refs.append(resolved)
+        parsed_fast = False
+        fast_has_text = False
+        fast_text_len = 0
 
-        text = " ".join(body.stripped_strings)
-        compact_text_len = len(re.sub(r"[^\w]+", "", text, flags=re.UNICODE))
-        # Se não há imagens, qualquer texto visível deve ser preservado (até
-        # capítulos muito curtos). Com imagens, o limiar evita classificar
-        # legendas técnicas de páginas de mangá como capítulos textuais.
-        meaningful = bool(text.strip()) and (not image_refs or compact_text_len >= 12)
+        try:
+            root = ET.fromstring(raw)
+            body = next((el for el in root.iter() if _local_name(el.tag).lower() == "body"), root)
+            banned = {"script", "style", "noscript", "form"}
+
+            def add_text(value):
+                nonlocal fast_has_text, fast_text_len
+                if not value or not value.strip():
+                    return
+                fast_has_text = True
+                if fast_text_len < 12:
+                    fast_text_len += sum(1 for ch in value if ch.isalnum() or ch == "_")
+
+            def walk(el, blocked=False):
+                name = _local_name(el.tag).lower()
+                blocked_here = blocked or name in banned
+                if not blocked_here:
+                    if name == "img":
+                        src = el.attrib.get("src")
+                        if src:
+                            resolved = _resolve_epub_path(item_path, src)
+                            if self._zip_names is not None and resolved in self._zip_names and Path(resolved).suffix.lower() in IMG_EXTS:
+                                image_refs.append(resolved)
+                    elif name == "image":
+                        src = (
+                            el.attrib.get("href")
+                            or el.attrib.get("{http://www.w3.org/1999/xlink}href")
+                            or el.attrib.get("xlink:href")
+                        )
+                        if src:
+                            resolved = _resolve_epub_path(item_path, src)
+                            if self._zip_names is not None and resolved in self._zip_names and Path(resolved).suffix.lower() in IMG_EXTS:
+                                image_refs.append(resolved)
+                    add_text(el.text)
+                for child in el:
+                    walk(child, blocked_here)
+                    # tail pertence ao pai; mesmo que o filho seja <script>, o
+                    # texto após </script> continua sendo conteúdo do pai.
+                    if not blocked_here:
+                        add_text(child.tail)
+
+            walk(body)
+            parsed_fast = True
+        except ET.ParseError:
+            parsed_fast = False
+
+        if parsed_fast:
+            meaningful = fast_has_text and (not image_refs or fast_text_len >= 12)
+        else:
+            BeautifulSoup = _beautiful_soup()
+            if BeautifulSoup is None:
+                raise ArchiveError(tr("error.epub_support"))
+            soup = BeautifulSoup(raw, "html.parser")
+            body = soup.body or soup
+            for tag in body.find_all(["script", "style", "noscript", "form"]):
+                tag.decompose()
+            for img in body.find_all("img"):
+                src = img.get("src")
+                if src:
+                    resolved = _resolve_epub_path(item_path, src)
+                    if self._zip_names is not None and resolved in self._zip_names and Path(resolved).suffix.lower() in IMG_EXTS:
+                        image_refs.append(resolved)
+            for svg_img in body.find_all("image"):
+                src = svg_img.get("href") or svg_img.get("xlink:href")
+                if src:
+                    resolved = _resolve_epub_path(item_path, src)
+                    if self._zip_names is not None and resolved in self._zip_names and Path(resolved).suffix.lower() in IMG_EXTS:
+                        image_refs.append(resolved)
+
+            meaningful = False
+            compact_text_len = 0
+            for chunk in body.stripped_strings:
+                if not chunk:
+                    continue
+                if not image_refs:
+                    meaningful = True
+                    break
+                compact_text_len += sum(1 for ch in chunk if ch.isalnum() or ch == "_")
+                if compact_text_len >= 12:
+                    meaningful = True
+                    break
 
         if not meaningful and image_refs:
-            # Página puramente ilustrada: cada imagem vira uma página normal,
-            # exatamente como CBZ/CBR/PDF.
             return [
                 {"type": "image", "path": img_path, "source": item_path}
                 for img_path in image_refs
             ]
 
         if meaningful:
-            # Não embute imagens/base64 de todos os capítulos durante a
-            # abertura. O XHTML limpo é preparado somente quando o usuário
-            # realmente chega a este capítulo textual.
-            return [{
-                "type": "text",
-                "html": None,
-                "html_raw": body.decode_contents(),
-                "source": item_path,
-            }]
+            return [{"type": "text", "source": item_path}]
 
         return []
 
@@ -990,7 +1119,7 @@ class ComicArchive:
         entry = self.pages[index]
         if self.kind == "dir":
             return Path(entry).suffix.lower()
-        if self.kind == "image":
+        if self.kind in ("image", "video"):
             return self.path.suffix.lower()
         if self.kind in ("zip", "rar"):
             return Path(entry).suffix.lower()
@@ -1000,7 +1129,7 @@ class ComicArchive:
 
     def animation_candidate(self, index: int) -> bool:
         """Teste O(1) usado pela UI; não varre a coleção nem decodifica frames."""
-        if self.is_text_page(index):
+        if self.kind == "video" or self.is_text_page(index):
             return False
         return self.page_suffix(index) in ANIMATION_CANDIDATE_EXTS
 
@@ -1031,6 +1160,8 @@ class ComicArchive:
         """
         if self.is_text_page(index):
             raise ArchiveError(tr("error.epub_text_no_image"))
+        if self.kind == "video":
+            raise ArchiveError(tr("error.video_no_image"))
 
         entry = self.pages[index]
         if self.kind == "pdf":
@@ -1047,7 +1178,7 @@ class ComicArchive:
                 zoom = self.PDF_ZOOM
                 if max_dim:
                     longest = max(float(rect.width), float(rect.height), 1.0)
-                    zoom = min(self.PDF_ZOOM, max(0.12, float(max_dim) / longest))
+                    zoom = min(self.PDF_ZOOM, max(0.03, float(max_dim) / longest))
                 pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
                 img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
                 if max_dim and max(img.size) > int(max_dim):
@@ -1111,22 +1242,44 @@ class ComicArchive:
     def text_html(self, index: int) -> str:
         if not self.is_text_page(index):
             raise ArchiveError(tr("error.epub_not_text"))
+        index = int(index)
+        cached = self._epub_html_cache.pop(index, None)
+        if cached is not None:
+            prepared, cost = cached
+            self._epub_html_cache[index] = (prepared, cost)
+            return prepared
+
         entry = self.pages[index]
-        prepared = entry.get("html")
-        if prepared is None:
-            BeautifulSoup = _beautiful_soup()
-            if BeautifulSoup is None:
-                raise ArchiveError(tr("error.epub_support"))
-            soup = BeautifulSoup(entry.get("html_raw", ""), "html.parser")
-            body = soup.body or soup
-            prepared = self._prepare_epub_html(entry.get("source", ""), body)
-            entry["html"] = prepared
-            # O HTML preparado substitui o bruto para não manter duas cópias
-            # do capítulo na memória pelo resto da sessão.
-            entry.pop("html_raw", None)
+        BeautifulSoup = _beautiful_soup()
+        if BeautifulSoup is None:
+            raise ArchiveError(tr("error.epub_support"))
+        source = entry.get("source", "")
+        try:
+            raw = self._zip_pool.read(source)
+        except (KeyError, OSError) as e:
+            raise ArchiveError(tr("error.epub_not_text")) from e
+        soup = BeautifulSoup(raw, "html.parser")
+        body = soup.body or soup
+        for tag in body.find_all(["script", "style", "noscript", "form"]):
+            tag.decompose()
+        prepared = self._prepare_epub_html(source, body)
+
+        # Strings ASCII/base64 usam armazenamento compacto nas versões atuais
+        # do Python; len*2 é um teto conservador sem fazer encode/cópia extra.
+        cost = max(1, len(prepared) * 2)
+        self._epub_html_cache[index] = (prepared, cost)
+        self._epub_html_cache_bytes += cost
+        while self._epub_html_cache and (
+            len(self._epub_html_cache) > self._epub_html_cache_entries
+            or self._epub_html_cache_bytes > self._epub_html_cache_limit
+        ):
+            _old_index, (_old_html, old_cost) = self._epub_html_cache.popitem(last=False)
+            self._epub_html_cache_bytes = max(0, self._epub_html_cache_bytes - int(old_cost))
         return prepared
 
     def read_bytes(self, index: int) -> bytes:
+        if self.kind == "video":
+            raise ArchiveError(tr("error.video_raw_disabled"))
         entry = self.pages[index]
         if self.kind == "pdf":
             fitz = _fitz_module()
@@ -1217,7 +1370,7 @@ class ComicArchive:
         entry = self.pages[index]
         if self.kind == "dir":
             return Path(entry).name
-        if self.kind == "image":
+        if self.kind in ("image", "video"):
             return self.path.name
         if self.kind in ("zip", "rar"):
             return Path(entry).name
@@ -1230,6 +1383,27 @@ class ComicArchive:
         return str(index + 1)
 
     def page_size(self, index: int):
+        index = int(index)
+        with self._lock:
+            cached = self._page_size_cache.get(index)
+            if cached is not None:
+                self._page_size_cache.move_to_end(index)
+                return cached
+        size = self._compute_page_size(index)
+        try:
+            size = (int(size[0]), int(size[1]))
+        except Exception:
+            size = (0, 0)
+        with self._lock:
+            self._page_size_cache[index] = size
+            self._page_size_cache.move_to_end(index)
+            while len(self._page_size_cache) > self._page_size_cache_limit:
+                self._page_size_cache.popitem(last=False)
+        return size
+
+    def _compute_page_size(self, index: int):
+        if self.kind == "video":
+            return 0, 0
         if self.kind == "pdf":
             pool = self._pdf_pool
             if pool is None:
@@ -1289,6 +1463,7 @@ class ComicArchive:
             "rar": "type.cbr",
             "dir": "type.image_folder",
             "image": "type.image",
+            "video": "type.video",
             "pdf": "type.pdf",
             "epub": "type.epub",
         }
@@ -1484,6 +1659,14 @@ class ComicArchive:
         with self._lock:
             self._raw_cache.clear()
             self._raw_cache_bytes = 0
+            self._page_size_cache.clear()
+            self._epub_html_cache.clear()
+            self._epub_html_cache_bytes = 0
+            if hasattr(self, "_epub_thumbnail_page_count_cache"):
+                try:
+                    self._epub_thumbnail_page_count_cache.clear()
+                except Exception:
+                    pass
             for event in self._raw_inflight.values():
                 event.set()
             self._raw_inflight.clear()

@@ -9,9 +9,11 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QAbstractItemView, QStyle
 )
 
-from app.archive import ComicArchive, natural_key, SUPPORTED_FILE_EXTS
+from app.archive import ComicArchive, natural_key, SUPPORTED_FILE_EXTS, VIDEO_EXTS
 from app.compressed_collection import CompressedComicCollection, is_container_path
 from app.i18n import tr
+from app.video_utils import video_placeholder_pixmap
+from app.format_badge_delegate import FormatBadgeDelegate, FORMAT_ROLE, format_label_from_name
 
 COMIC_EXTS = tuple(SUPPORTED_FILE_EXTS)
 
@@ -25,25 +27,35 @@ COLUMNS = 4
 
 
 class _CoverSignals(QObject):
-    done = Signal(int, QImage)
-    failed = Signal(int, str)
+    done = Signal(int, QImage, int)
+    failed = Signal(int, str, int)
 
 
 class _CoverLoadTask(QRunnable):
     """Abre um arquivo de HQ em segundo plano só para extrair a 1ª página
     (capa) e gerar uma miniatura, sem travar a interface."""
 
-    def __init__(self, index, path=None, max_dim=220, collection=None, member_index=None):
+    def __init__(self, index, path=None, max_dim=220, collection=None, member_index=None, generation=0, video=False):
         super().__init__()
         self.index = index
+        self.generation = int(generation)
         self.path = path
         self.max_dim = max_dim
         self.collection = collection
         self.member_index = member_index
+        self.video = bool(video)
         self.signals = _CoverSignals()
 
     def run(self):
         try:
+            if self.video:
+                from app.windows_thumbnail import explorer_thumbnail
+                qimg = explorer_thumbnail(self.path, THUMB_SIZE)
+                if qimg is None or qimg.isNull():
+                    raise RuntimeError("Windows Shell thumbnail unavailable")
+                self.signals.done.emit(self.index, qimg, self.generation)
+                return
+
             owned_collection = None
             if self.collection is not None:
                 # Em coleções mistas, imagens avulsas são lidas diretamente
@@ -69,9 +81,9 @@ class _CoverLoadTask(QRunnable):
             w, h = img.size
             raw = img.tobytes()
             qimg = QImage(raw, w, h, w * 3, QImage.Format_RGB888).copy()
-            self.signals.done.emit(self.index, qimg)
+            self.signals.done.emit(self.index, qimg, self.generation)
         except Exception as e:  # noqa: BLE001
-            self.signals.failed.emit(self.index, str(e))
+            self.signals.failed.emit(self.index, str(e), self.generation)
 
 
 class SummaryDialog(QDialog):
@@ -91,7 +103,8 @@ class SummaryDialog(QDialog):
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(2)
         self.pool.setExpiryTimeout(30_000)
-        self._tasks = []
+        self._cover_tasks = {}
+        self._cover_generation = 0
         self._cover_requested = set()
         self._cover_timer = QTimer(self)
         self._cover_timer.setSingleShot(True)
@@ -116,6 +129,7 @@ class SummaryDialog(QDialog):
         self.list_widget.setViewMode(QListWidget.IconMode)
         self.list_widget.setIconSize(THUMB_SIZE)
         self.list_widget.setGridSize(GRID_SIZE)
+        self.list_widget.setItemDelegate(FormatBadgeDelegate(THUMB_SIZE, self.list_widget))
         self.list_widget.setResizeMode(QListWidget.Adjust)
         self.list_widget.setMovement(QListWidget.Static)
         self.list_widget.setWordWrap(False)
@@ -185,8 +199,7 @@ class SummaryDialog(QDialog):
     def _populate(self, folder, current_name):
         self._empty_message_key = None
         self.list_widget.clear()
-        self._tasks = []
-        self._cover_requested.clear()
+        self._reset_cover_generation()
         try:
             files = sorted(
                 (f for f in folder.iterdir()
@@ -217,6 +230,11 @@ class SummaryDialog(QDialog):
             item.setSizeHint(GRID_SIZE)
             item.setToolTip(f.name)
             item.setData(Qt.UserRole, str(f))
+            item.setData(FORMAT_ROLE, format_label_from_name(f.name))
+            is_video = f.suffix.lower() in VIDEO_EXTS
+            item.setData(Qt.UserRole + 2, is_video)
+            if is_video:
+                item.setIcon(QIcon(video_placeholder_pixmap(THUMB_SIZE)))
             item.setTextAlignment(Qt.AlignHCenter)
             if is_current:
                 font = item.font()
@@ -239,8 +257,7 @@ class SummaryDialog(QDialog):
         """Lista CBZ/CBR e imagens internas como itens independentes."""
         self._empty_message_key = None
         self.list_widget.clear()
-        self._tasks = []
-        self._cover_requested.clear()
+        self._reset_cover_generation()
 
         if collection.count() <= 0:
             self._empty_message_key = "summary.no_collection_items"
@@ -261,6 +278,11 @@ class SummaryDialog(QDialog):
             item.setToolTip(name)
             item.setData(Qt.UserRole, name)
             item.setData(Qt.UserRole + 1, index)
+            item.setData(FORMAT_ROLE, format_label_from_name(name))
+            is_video = collection.member_kind(index) == "video"
+            item.setData(Qt.UserRole + 2, is_video)
+            if is_video:
+                item.setIcon(QIcon(video_placeholder_pixmap(THUMB_SIZE)))
             item.setTextAlignment(Qt.AlignHCenter)
             if is_current:
                 font = item.font()
@@ -290,10 +312,44 @@ class SummaryDialog(QDialog):
         end = min(count, (last_row + 1) * cols)
         return range(start, end)
 
+    def _reset_cover_generation(self):
+        self._cover_generation += 1
+        self._cover_requested.clear()
+        self._cancel_all_cover_tasks()
+
+    def _cancel_stale_cover_tasks(self, keep_rows):
+        keep = {int(row) for row in keep_rows}
+        generation = self._cover_generation
+        for token, task in list(self._cover_tasks.items()):
+            task_generation, row = token
+            if task_generation != generation or row in keep:
+                continue
+            try:
+                removed = self.pool.tryTake(task)
+            except Exception:
+                removed = False
+            if removed:
+                self._cover_tasks.pop(token, None)
+                self._cover_requested.discard(row)
+
+    def _cancel_all_cover_tasks(self):
+        # Retira tudo que ainda não iniciou. Tarefas já em execução permanecem
+        # referenciadas até emitirem o sinal final; a geração impede que uma
+        # capa antiga seja aplicada depois de a lista ter sido repopulada.
+        for token, task in list(getattr(self, "_cover_tasks", {}).items()):
+            try:
+                removed = self.pool.tryTake(task)
+            except Exception:
+                removed = False
+            if removed:
+                self._cover_tasks.pop(token, None)
+
     def _request_visible_covers(self):
         if not self.isVisible():
             return
-        for row in self._visible_cover_rows():
+        visible_rows = list(self._visible_cover_rows())
+        self._cancel_stale_cover_tasks(visible_rows)
+        for row in visible_rows:
             if row in self._cover_requested:
                 continue
             item = self.list_widget.item(row)
@@ -302,6 +358,26 @@ class SummaryDialog(QDialog):
             path = item.data(Qt.UserRole)
             if not path:
                 continue
+            is_video = bool(item.data(Qt.UserRole + 2))
+            if is_video:
+                video_path = path if self.collection is None else None
+                if self.collection is not None:
+                    member_index = item.data(Qt.UserRole + 1)
+                    getter = getattr(self.collection, "video_thumbnail_path", None)
+                    if getter is not None and member_index is not None:
+                        try:
+                            video_path = getter(int(member_index))
+                        except Exception:
+                            video_path = None
+                # Compactados não são extraídos em massa apenas para gerar
+                # thumbs. O placeholder permanece até o vídeo ser materializado.
+                if video_path is None:
+                    self._cover_requested.add(row)
+                    continue
+                self._cover_requested.add(row)
+                self._request_cover(row, video_path, video=True)
+                continue
+
             self._cover_requested.add(row)
             if self.collection is not None:
                 member_index = item.data(Qt.UserRole + 1)
@@ -309,19 +385,37 @@ class SummaryDialog(QDialog):
             else:
                 self._request_cover(row, path)
 
-    def _request_cover(self, index, path, member_index=None):
+    def _request_cover(self, index, path, member_index=None, video=False):
+        generation = self._cover_generation
         task = _CoverLoadTask(
             index, str(path) if path is not None else None,
             collection=self.collection if member_index is not None else None,
             member_index=member_index,
+            generation=generation,
+            video=video,
         )
         task.signals.done.connect(self._on_cover_ready)
-        self._tasks.append(task)
+        task.signals.failed.connect(self._on_cover_failed)
+        self._cover_tasks[(generation, int(index))] = task
         self.pool.start(task)
 
-    def _on_cover_ready(self, index, qimg):
+    def _finish_cover_task(self, index, generation):
+        self._cover_tasks.pop((int(generation), int(index)), None)
+
+    def _on_cover_ready(self, index, qimg, generation):
+        self._finish_cover_task(index, generation)
+        if generation != self._cover_generation:
+            return
         if 0 <= index < self.list_widget.count() and not qimg.isNull():
             self.list_widget.item(index).setIcon(QIcon(QPixmap.fromImage(qimg)))
+
+    def _on_cover_failed(self, index, _error, generation):
+        self._finish_cover_task(index, generation)
+
+    def hideEvent(self, event):
+        self._cover_timer.stop()
+        self._cancel_stale_cover_tasks(())
+        super().hideEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

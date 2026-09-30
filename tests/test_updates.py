@@ -7,7 +7,7 @@ from app.win_registration import FILE_TYPE_GROUPS
 
 
 def main():
-    assert APP_VERSION == "1.0.0"
+    assert APP_VERSION == "1.0.1"
 
     html = (
         '<p>Primeiro</p>'
@@ -44,11 +44,11 @@ def main():
 
     installer = Path(__file__).resolve().parents[1] / "build" / "installer.iss"
     text = installer.read_text(encoding="utf-8")
-    assert '#define MyAppVersion "1.0.0"' in text
+    assert '#define MyAppVersion "1.0.1"' in text
     assert 'Name: "associateepub"' in text
     assert 'Name: "associatepdf"' in text
 
-    print("Atualizações 1.0.0: OK")
+    print("Atualizações 1.0.1: OK")
 
 
 if __name__ == "__main__":

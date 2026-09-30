@@ -11,10 +11,10 @@ from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QImage
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog, QLabel, QSlider, QDialog,
     QWidget, QHBoxLayout, QVBoxLayout, QStackedWidget, QDockWidget,
-    QToolButton, QStatusBar, QApplication, QInputDialog
+    QToolButton, QStatusBar, QApplication, QInputDialog, QMenu
 )
 
-from app.format_defs import natural_key, SUPPORTED_FILE_EXTS, STANDALONE_IMAGE_EXTS, is_container_path
+from app.format_defs import natural_key, SUPPORTED_FILE_EXTS, STANDALONE_IMAGE_EXTS, VIDEO_EXTS, is_container_path
 from app.windows_chrome import apply_edge_chrome
 from app.settings import Settings
 from app.version import APP_VERSION
@@ -44,6 +44,7 @@ def file_filter():
         tr("filter.comics"),
         tr("filter.pdf"),
         tr("filter.epub"),
+        tr("filter.video"),
         tr("filter.containers"),
         tr("filter.all"),
     ))
@@ -77,6 +78,10 @@ class MainWindow(QMainWindow):
         self._thumbnail_member_map = None
         self._thumbnail_member_row = None
         self._thumbnail_scope_archive = None
+        self._epub_thumbnail_scope = None
+        # EPUB textual usa apenas páginas fixas simples/duplas. Não mantemos
+        # mais provider/view de rolagem textual em memória nem código de
+        # reconstrução desse modo.
         self._progress_key = None
         self.current_index = 0
         self.mode = self.settings.get("mode", MODE_SINGLE)
@@ -149,6 +154,24 @@ class MainWindow(QMainWindow):
         self._animation_speed = float(self.settings.get("animation_speed", 1.0) or 1.0)
         if self._animation_speed not in (0.5, 1.0, 2.0):
             self._animation_speed = 1.0
+        self._video_audio_enabled = self.settings.get_bool("video_audio_enabled", False)
+        try:
+            self._video_volume = max(0, min(100, int(self.settings.get("video_volume", 75) or 75)))
+        except (TypeError, ValueError):
+            self._video_volume = 75
+        self._video_repeat = self.settings.get_bool("video_repeat", False)
+        self._video_auto_advance = self.settings.get_bool("video_auto_advance", False)
+        try:
+            self._video_speed = float(self.settings.get("video_speed", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            self._video_speed = 1.0
+        if self._video_speed not in (0.5, 0.75, 1.0, 1.25, 1.5, 2.0):
+            self._video_speed = 1.0
+        # Repetir o vídeo atual e avançar ao terminar são comportamentos
+        # incompatíveis; configurações antigas/conflitantes priorizam repetir.
+        if self._video_repeat and self._video_auto_advance:
+            self._video_auto_advance = False
+            self.settings.set("video_auto_advance", False)
 
         # QFileSystemWatcher abre handles nativos. Ele só é necessário depois
         # que algum conteúdo real foi aberto, portanto fica lazy.
@@ -203,6 +226,7 @@ class MainWindow(QMainWindow):
         self.empty_label.setAlignment(Qt.AlignCenter)
         self.empty_label.setObjectName("emptyLabel")
         self.stack.addWidget(self.empty_label)
+        self._enable_reader_context_menu(self.stack)
 
         outer.addWidget(self.stack, 1)
 
@@ -301,6 +325,132 @@ class MainWindow(QMainWindow):
         action.changed.connect(sync_button)
         return btn
 
+    def _enable_reader_context_menu(self, view):
+        """Ativa o menu de contexto na superfície real de leitura.
+
+        QAbstractScrollArea recebe o clique direito no viewport, não no objeto
+        externo. O marcador evita conectar o mesmo viewport duas vezes.
+        """
+        if view is None:
+            return
+        target = view.viewport() if hasattr(view, "viewport") else view
+        try:
+            if bool(target.property("quaintReaderContextMenu")):
+                return
+            target.setProperty("quaintReaderContextMenu", True)
+            target.setContextMenuPolicy(Qt.CustomContextMenu)
+            target.customContextMenuRequested.connect(
+                lambda pos, widget=target: self._show_reader_context_menu(
+                    widget.mapToGlobal(pos)
+                )
+            )
+        except (AttributeError, RuntimeError):
+            pass
+
+    def _show_reader_context_menu(self, global_pos):
+        """Menu contextual compacto, adaptado ao tipo de conteúdo visível."""
+        menu = QMenu(self)
+        if not self.archive:
+            menu.addAction(self.act_open_file)
+            menu.addAction(self.act_open_folder)
+            menu.exec(global_pos)
+            return
+
+        is_text = self.archive.is_text_page(self.current_index)
+        menu.addAction(self.act_prev)
+        menu.addAction(self.act_next)
+        menu.addSeparator()
+
+        view_menu = menu.addMenu(tr("menu.view"))
+        view_menu.addAction(self.act_mode_single)
+        # Mantém todos os modos visíveis também no menu contextual. Quando o
+        # arquivo atual não aceita rolagem contínua (EPUB textual/imagem avulsa),
+        # o próprio QAction permanece desabilitado e o QSS o exibe em cinza.
+        view_menu.addAction(self.act_mode_continuous)
+        view_menu.addAction(self.act_mode_double)
+
+        if is_text:
+            epub_menu = menu.addMenu(tr("action.epub"))
+            epub_menu.addAction(self.act_epub_settings)
+            epub_menu.addSeparator()
+
+            increase = epub_menu.addAction(tr("epub.font_increase"))
+            decrease = epub_menu.addAction(tr("epub.font_decrease"))
+            increase.triggered.connect(lambda: self._adjust_epub_font_size(+1))
+            decrease.triggered.connect(lambda: self._adjust_epub_font_size(-1))
+
+            theme_menu = epub_menu.addMenu(tr("epub.theme"))
+            current_theme = self.settings.epub_theme()
+            for value, key in (
+                ("light", "epub.theme_light"),
+                ("dark", "epub.theme_dark"),
+                ("sepia", "epub.theme_sepia"),
+            ):
+                action = theme_menu.addAction(tr(key))
+                action.setCheckable(True)
+                action.setChecked(current_theme == value)
+                action.triggered.connect(
+                    lambda _checked=False, theme=value: self._set_epub_theme(theme)
+                )
+
+            epub_menu.addSeparator()
+            copy_text = epub_menu.addAction(tr("epub.copy_chapter_text"))
+            copy_text.triggered.connect(self.copy_epub_chapter_text)
+        elif self.archive.kind == "video":
+            video_menu = menu.addMenu(tr("menu.video"))
+            video_menu.addAction(self.act_video_play_pause)
+            video_menu.addAction(self.act_video_audio)
+            video_menu.addSeparator()
+            video_menu.addAction(self.act_save_video_frame)
+            video_menu.addSeparator()
+            video_menu.addAction(self.act_video_repeat)
+            video_menu.addAction(self.act_video_auto_advance)
+            speed_menu = video_menu.addMenu(tr("menu.video_speed"))
+            for speed in (0.5, 0.75, 1.0, 1.25, 1.5, 2.0):
+                speed_menu.addAction(self.video_speed_actions[speed])
+        else:
+            fit_menu = menu.addMenu(tr("context.fit"))
+            fit_menu.addAction(self.act_fit_page)
+            fit_menu.addAction(self.act_fit_width)
+            fit_menu.addAction(self.act_fit_height)
+
+            zoom_menu = menu.addMenu(tr("context.zoom"))
+            zoom_menu.addAction(self.act_zoom_in)
+            zoom_menu.addAction(self.act_zoom_out)
+            zoom_menu.addAction(self.act_zoom_100)
+            zoom_menu.addAction(self.act_zoom_200)
+
+            menu.addSeparator()
+            menu.addAction(self.act_rotate_left)
+            menu.addAction(self.act_rotate_right)
+            menu.addAction(self.act_flip_horizontal)
+            menu.addAction(self.act_flip_vertical)
+            menu.addSeparator()
+            menu.addAction(self.act_copy_image)
+            menu.addAction(self.act_save_page)
+            menu.addAction(self.act_set_wallpaper)
+            menu.addAction(self.act_adjustments)
+
+        menu.addSeparator()
+        menu.addAction(self.act_thumbs)
+        menu.addAction(self.act_summary)
+        menu.addAction(self.act_fullscreen)
+        menu.addAction(self.act_image_only)
+        menu.exec(global_pos)
+
+    def contextMenuEvent(self, event):  # noqa: N802
+        # Fallback para áreas vazias do QStackedWidget que não pertencem ao
+        # viewport de uma visualização concreta.
+        try:
+            pos = self.stack.mapFromGlobal(event.globalPos())
+            if self.stack.rect().contains(pos):
+                self._show_reader_context_menu(event.globalPos())
+                event.accept()
+                return
+        except RuntimeError:
+            pass
+        super().contextMenuEvent(event)
+
     def _build_actions(self):
         # Ações do menu — sem ícones (apenas texto + atalho), a pedido do usuário.
         self.act_open_file = QAction(tr("action.open_file"), self)
@@ -380,6 +530,20 @@ class MainWindow(QMainWindow):
             QKeySequence(Qt.Key_PageDown),
         ])
         self.act_next.triggered.connect(self.next_page)
+
+        # Atalhos adicionais fixos, independentes da personalização do atalho
+        # principal: vírgula volta e ponto avança, como solicitado para leitura.
+        self.act_prev_comma = QAction(self)
+        self.act_prev_comma.setShortcut(QKeySequence(","))
+        self.act_prev_comma.setShortcutContext(Qt.WindowShortcut)
+        self.act_prev_comma.triggered.connect(self.prev_page)
+        self.addAction(self.act_prev_comma)
+
+        self.act_next_period = QAction(self)
+        self.act_next_period.setShortcut(QKeySequence("."))
+        self.act_next_period.setShortcutContext(Qt.WindowShortcut)
+        self.act_next_period.triggered.connect(self.next_page)
+        self.addAction(self.act_next_period)
 
         # Espaço é contextual: pausa/retoma uma animação visível; em uma
         # página estática mantém o comportamento histórico de avançar.
@@ -630,6 +794,47 @@ class MainWindow(QMainWindow):
         self.act_save_animation_frame.setShortcut(QKeySequence("Ctrl+Alt+S"))
         self.act_save_animation_frame.triggered.connect(self.save_current_animation_frame)
 
+        # --- Vídeo (QtMultimedia é importado apenas ao abrir um vídeo) ---
+        self.act_video_play_pause = QAction(tr("action.video_play_pause"), self)
+        self.act_video_play_pause.triggered.connect(self.toggle_video_playback)
+        self.act_video_play_pause.setEnabled(False)
+
+        self.act_video_audio = QAction(tr("action.video_audio"), self)
+        self.act_video_audio.setCheckable(True)
+        self.act_video_audio.setChecked(self._video_audio_enabled)
+        self.act_video_audio.triggered.connect(self.set_video_audio_enabled)
+        self.act_video_audio.setEnabled(False)
+
+        self.act_save_video_frame = QAction(tr("action.save_video_frame"), self)
+        self.act_save_video_frame.triggered.connect(self.save_current_video_frame)
+        self.act_save_video_frame.setEnabled(False)
+
+        self.act_video_repeat = QAction(tr("action.video_repeat"), self)
+        self.act_video_repeat.setCheckable(True)
+        self.act_video_repeat.setChecked(self._video_repeat)
+        self.act_video_repeat.triggered.connect(self.set_video_repeat)
+        self.act_video_repeat.setEnabled(False)
+
+        self.act_video_auto_advance = QAction(tr("action.video_auto_advance"), self)
+        self.act_video_auto_advance.setCheckable(True)
+        self.act_video_auto_advance.setChecked(self._video_auto_advance)
+        self.act_video_auto_advance.triggered.connect(self.set_video_auto_advance)
+        self.act_video_auto_advance.setEnabled(False)
+
+        self.video_speed_group = QActionGroup(self)
+        self.video_speed_group.setExclusive(True)
+        self.video_speed_actions = {}
+        for speed in (0.5, 0.75, 1.0, 1.25, 1.5, 2.0):
+            action = QAction(tr("action.video_speed", speed=f"{speed:g}"), self)
+            action.setCheckable(True)
+            action.setChecked(self._video_speed == speed)
+            action.setEnabled(False)
+            action.triggered.connect(
+                lambda _checked=False, value=speed: self.set_video_speed(value)
+            )
+            self.video_speed_group.addAction(action)
+            self.video_speed_actions[speed] = action
+
         # --- Ferramentas ---
         self.act_magnifier = QAction(tr("action.magnifier"), self)
         self.act_magnifier.setShortcut(QKeySequence("M"))
@@ -678,6 +883,9 @@ class MainWindow(QMainWindow):
         self.act_register_images = QAction(tr("action.register_images"), self)
         self.act_register_images.triggered.connect(self.register_image_file_types)
 
+        self.act_register_videos = QAction(tr("action.register_videos"), self)
+        self.act_register_videos.triggered.connect(self.register_video_file_types)
+
         self.act_unregister = QAction(tr("action.unregister"), self)
         self.act_unregister.triggered.connect(self.unregister_file_types)
 
@@ -713,6 +921,7 @@ class MainWindow(QMainWindow):
         self.menu_file.addSeparator()
         self.menu_file.addAction(self.act_save_page)
         self.menu_file.addAction(self.act_save_changes)
+        self.menu_file.addAction(self.act_save_video_frame)
         self.menu_file.addAction(self.act_batch_export)
         self.menu_file.addSeparator()
         self.menu_file.addAction(self.act_direction)
@@ -806,6 +1015,17 @@ class MainWindow(QMainWindow):
         self.menu_animation.addAction(self.act_animation_prev_frame)
         self.menu_animation.addAction(self.act_animation_next_frame)
         self.menu_animation.addAction(self.act_save_animation_frame)
+        self.menu_video = self.menu_tools.addMenu(tr("menu.video"))
+        self.menu_video.addAction(self.act_video_play_pause)
+        self.menu_video.addAction(self.act_video_audio)
+        self.menu_video.addSeparator()
+        self.menu_video.addAction(self.act_save_video_frame)
+        self.menu_video.addSeparator()
+        self.menu_video.addAction(self.act_video_repeat)
+        self.menu_video.addAction(self.act_video_auto_advance)
+        self.menu_video_speed = self.menu_video.addMenu(tr("menu.video_speed"))
+        for speed in (0.5, 0.75, 1.0, 1.25, 1.5, 2.0):
+            self.menu_video_speed.addAction(self.video_speed_actions[speed])
         self.menu_tools.addSeparator()
         self.menu_tools.addAction(self.act_shortcuts)
         self.menu_tools.addAction(self.act_restore_session)
@@ -817,6 +1037,7 @@ class MainWindow(QMainWindow):
         self.menu_assoc.addAction(self.act_register_epub)
         self.menu_assoc.addAction(self.act_register_pdf)
         self.menu_assoc.addAction(self.act_register_images)
+        self.menu_assoc.addAction(self.act_register_videos)
         self.menu_assoc.addSeparator()
         self.menu_assoc.addAction(self.act_unregister)
 
@@ -828,6 +1049,12 @@ class MainWindow(QMainWindow):
     def _shutdown_loaders(self):
         """Interrompe pré-carregamentos antigos antes de trocar/fechar o arquivo."""
         self._animation_sync_timer.stop()
+        video_view = getattr(self, "video_view", None)
+        if video_view is not None:
+            try:
+                video_view.shutdown()
+            except Exception:
+                pass
         if self.bookmark_panel is not None:
             try:
                 self.bookmark_panel.clear_source()
@@ -1054,17 +1281,31 @@ class MainWindow(QMainWindow):
         self._activate_archive(new_archive, add_recent=False, go_to_last=go_to_last)
 
     def _activate_archive(self, new_archive, add_recent=False, go_to_last=False):
-        from app.pixmap_provider import PixmapProvider
         self.archive = new_archive
         if self._pending_open_root_path:
             self._opened_root_path = self._pending_open_root_path
             self._pending_open_root_path = None
         self._sort_archive_pages(self.archive)
-        self.provider = PixmapProvider(self.archive)
-        self.provider.set_adjustments(*self.settings.get_adjustments())
-        self.provider.set_filter(self.settings.image_filter())
-        self.provider.set_animation_speed(self._animation_speed)
+        if self.archive.kind == "video":
+            self.provider = None
+        else:
+            from app.pixmap_provider import PixmapProvider
+            self.provider = PixmapProvider(self.archive)
+            self.provider.set_adjustments(*self.settings.get_adjustments())
+            self.provider.set_filter(self.settings.image_filter())
+            self.provider.set_animation_speed(self._animation_speed)
         self.current_index = 0
+        # EPUB que contém texto usa exclusivamente páginas fixas (simples ou
+        # duplas). Se o modo global anterior era rolagem contínua, faça fallback
+        # local para página única antes de construir qualquer view.
+        if self.archive.has_text_pages() and self.mode == MODE_CONTINUOUS:
+            self.mode = MODE_SINGLE
+
+        # Limpa mapas temporários pertencentes ao arquivo anterior.
+        self._epub_thumbnail_scope = None
+        self._thumbnail_scope_archive = None
+        self._thumbnail_member_map = None
+        self._thumbnail_member_row = None
 
         self._rebuild_views()
         self._prepare_thumbnail_scope()
@@ -1072,18 +1313,27 @@ class MainWindow(QMainWindow):
 
         self.slider.setMaximum(max(self.archive.count() - 1, 0))
         self._update_ui_enabled(True)
-        mixed_epub = self.archive.has_text_pages()
-        single_image = self.archive.kind == "image"
-        for action in (self.act_mode_continuous, self.act_mode_double):
-            action.setEnabled(not (mixed_epub or single_image))
-            if mixed_epub:
-                action.setToolTip(tr("tooltip.epub_text_single"))
-            elif single_image:
-                action.setToolTip(tr("tooltip.standalone_single"))
-            else:
-                action.setToolTip("")
+        single_image = self.archive.kind in ("image", "video")
+        text_epub = self.archive.has_text_pages()
+        # Rolagem contínua permanece disponível para PDF, CBZ/imagens e EPUB
+        # composto somente por imagens. EPUB com qualquer página textual usa
+        # exclusivamente página única ou páginas duplas.
+        continuous_allowed = not single_image and not text_epub
+        self.act_mode_continuous.setEnabled(continuous_allowed)
+        # A opção permanece visível para deixar claro que o modo existe, mas
+        # fica indisponível em EPUB textual. O QSS pinta ações desabilitadas em
+        # cinza de forma consistente com o restante do programa.
+        self.act_mode_continuous.setVisible(True)
+        standalone_tip = (
+            tr("tooltip.video_single") if self.archive.kind == "video"
+            else (tr("tooltip.standalone_single") if single_image else "")
+        )
+        self.act_mode_continuous.setToolTip(
+            tr("tooltip.epub_text_no_continuous") if text_epub else standalone_tip
+        )
+        self.act_mode_double.setEnabled(not single_image)
+        self.act_mode_double.setToolTip(standalone_tip)
         self.act_mode_single.setEnabled(True)
-
         if add_recent:
             self.settings.add_recent(str(self.archive.path))
             self._refresh_recent_menu()
@@ -1102,7 +1352,7 @@ class MainWindow(QMainWindow):
             )
         else:
             self.setWindowTitle(f"{tr('app.title')} — {self.archive.display_name()}")
-            unit = tr("unit.reading_items") if self.archive.has_text_pages() else tr("unit.pages")
+            unit = (tr("unit.video") if self.archive.kind == "video" else (tr("unit.reading_items") if self.archive.has_text_pages() else tr("unit.pages")))
             self.statusBar().showMessage(
                 tr("status.archive_opened", name=self.archive.display_name(), count=self.archive.count(), unit=unit), 5000
             )
@@ -1112,7 +1362,7 @@ class MainWindow(QMainWindow):
         else:
             start_index = self.settings.get_progress(self._progress_key or str(self.archive.path))
             start_index = max(0, min(start_index, self.archive.count() - 1))
-        self.go_to_page(start_index)
+        self.go_to_page(start_index, epub_position="last" if go_to_last else None)
         self._watch_current_sources()
 
     def _close_collection(self):
@@ -1123,6 +1373,7 @@ class MainWindow(QMainWindow):
         self._thumbnail_member_map = None
         self._thumbnail_member_row = None
         self._thumbnail_scope_archive = None
+        self._epub_thumbnail_scope = None
 
     def reopen_last_file(self):
         """Atalho 'R': reabre o último arquivo lido. Se já houver um arquivo
@@ -1324,7 +1575,6 @@ class MainWindow(QMainWindow):
         # Views e overlays são o maior bloco de widgets do programa. Deferir
         # seus imports até existir conteúdo elimina dezenas de classes do
         # caminho de inicialização com a janela vazia.
-        from app.views import SinglePageView
 
         if self._color_picker is not None:
             try:
@@ -1349,18 +1599,37 @@ class MainWindow(QMainWindow):
             self.stack.removeWidget(w)
             w.deleteLater()
 
-        for name in ("single_view", "continuous_view", "double_view", "epub_text_view"):
+        for name in ("single_view", "continuous_view", "double_view", "epub_text_view", "video_view"):
             if hasattr(self, name):
                 try:
                     delattr(self, name)
                 except Exception:
                     pass
 
+        if self.archive is not None and self.archive.kind == "video":
+            from app.video_view import VideoView
+            self.video_view = VideoView(
+                audio_enabled=self._video_audio_enabled,
+                volume=self._video_volume,
+                playback_rate=self._video_speed,
+                icons_dir=self.icons_dir,
+            )
+            self.video_view.audio_enabled_changed.connect(self._on_video_audio_changed)
+            self.video_view.volume_changed.connect(self._on_video_volume_changed)
+            self.video_view.playback_error.connect(self._on_video_playback_error)
+            self.video_view.ended.connect(self._on_video_ended)
+            self.stack.addWidget(self.video_view)
+            self._enable_reader_context_menu(self.video_view.video_widget)
+            self.stack.setCurrentWidget(self.video_view)
+            return
+
+        from app.views import SinglePageView
         self.single_view = SinglePageView(self.provider)
         self.single_view.set_fit_mode(self.fit_mode)
         self.single_view.set_layout_mode(self.layout_mode)
 
         self.stack.addWidget(self.single_view)
+        self._enable_reader_context_menu(self.single_view)
         self._connect_overlay_refresh_to_view(self.single_view)
         self._apply_mode_widget()
         self._apply_page_background()
@@ -1399,6 +1668,7 @@ class MainWindow(QMainWindow):
         view.set_layout_mode(self.layout_mode)
         self.continuous_view = view
         self.stack.addWidget(view)
+        self._enable_reader_context_menu(view)
         self._connect_overlay_refresh_to_view(view)
         color = BG_COLORS.get(self.page_background, BG_COLORS[BG_LIGHT])
         view.set_background_color(color, checker=self.page_background == BG_CHECKER)
@@ -1416,6 +1686,7 @@ class MainWindow(QMainWindow):
         view.set_layout_mode(self.layout_mode)
         self.double_view = view
         self.stack.addWidget(view)
+        self._enable_reader_context_menu(view)
         self._connect_overlay_refresh_to_view(view)
         color = BG_COLORS.get(self.page_background, BG_COLORS[BG_LIGHT])
         view.set_background_color(color, checker=self.page_background == BG_CHECKER)
@@ -1423,13 +1694,34 @@ class MainWindow(QMainWindow):
         return view
 
     def _apply_mode_widget(self):
-        # EPUB com capítulos textuais alterna entre texto refluível e página
-        # única para imagens. Modos contínuo/duplo continuam integrais em
-        # EPUBs somente de imagens.
-        if self.archive and (self.archive.has_text_pages() or self.archive.kind == "image"):
+        if not self.archive:
+            return
+        if self.archive.kind == "video":
+            self.stack.setCurrentWidget(self.video_view)
+            self.act_mode_single.setChecked(True)
+            return
+        if self.archive.kind == "image":
             self.stack.setCurrentWidget(self.single_view)
             self.act_mode_single.setChecked(True)
             return
+
+        if self.archive.has_text_pages():
+            # EPUB com texto não possui rolagem contínua. Mantém páginas fixas
+            # e orientação de livro; páginas internas de imagem permanecem
+            # isoladas quando necessário.
+            if self.mode == MODE_DOUBLE:
+                self.act_mode_double.setChecked(True)
+            else:
+                self.mode = MODE_SINGLE
+                self.act_mode_single.setChecked(True)
+            if self.archive.is_text_page(self.current_index):
+                view = self._ensure_epub_text_view()
+                view.set_mode("double" if self.mode == MODE_DOUBLE else "single")
+                self.stack.setCurrentWidget(view)
+            else:
+                self.stack.setCurrentWidget(self.single_view)
+            return
+
         if self.mode == MODE_SINGLE:
             self.stack.setCurrentWidget(self.single_view)
             self.act_mode_single.setChecked(True)
@@ -1444,16 +1736,36 @@ class MainWindow(QMainWindow):
             self.act_mode_double.setChecked(True)
 
     def set_mode(self, mode):
-        if self.archive and self.archive.kind == "image" and mode != MODE_SINGLE:
+        if self.archive and self.archive.kind in ("image", "video") and mode != MODE_SINGLE:
             self.act_mode_single.setChecked(True)
-            self.statusBar().showMessage(
-                tr("status.image_single_only"), 3500
-            )
+            key = "status.video_single_only" if self.archive.kind == "video" else "status.image_single_only"
+            self.statusBar().showMessage(tr(key), 3500)
+            return
+        if self.archive and self.archive.has_text_pages() and mode == MODE_CONTINUOUS:
+            # Também bloqueia chamadas programáticas/atalhos além do QAction
+            # desabilitado, impedindo recriação acidental da antiga view.
+            fallback = MODE_DOUBLE if self.mode == MODE_DOUBLE else MODE_SINGLE
+            self.mode = fallback
+            self.act_mode_double.setChecked(fallback == MODE_DOUBLE)
+            self.act_mode_single.setChecked(fallback != MODE_DOUBLE)
+            self.statusBar().showMessage(tr("status.epub_fixed_pages_only"), 3500)
             return
         self.mode = mode
         self.settings.set("mode", mode)
         if not self.archive:
             return
+
+        if self.archive.is_text_page(self.current_index):
+            view = self._ensure_epub_text_view()
+            view.set_mode("double" if mode == MODE_DOUBLE else "single")
+            self.stack.setCurrentWidget(view)
+            self._on_epub_pagination_changed(
+                view.spread_start_index(), view.spread_end_index(), view.page_count()
+            )
+            self.act_mode_double.setChecked(mode == MODE_DOUBLE)
+            self.act_mode_single.setChecked(mode != MODE_DOUBLE)
+            return
+
         self._apply_mode_widget()
         self.go_to_page(self.current_index)
 
@@ -1477,7 +1789,11 @@ class MainWindow(QMainWindow):
         if not self.archive or self.archive.is_text_page(self.current_index):
             return None
         widget = self.stack.currentWidget() if hasattr(self, "stack") else None
-        if widget in (getattr(self, "single_view", None), getattr(self, "double_view", None), getattr(self, "continuous_view", None)):
+        if widget in (
+            getattr(self, "single_view", None),
+            getattr(self, "double_view", None),
+            getattr(self, "continuous_view", None),
+        ):
             return widget
         return getattr(self, "single_view", None)
 
@@ -1511,6 +1827,9 @@ class MainWindow(QMainWindow):
         self.settings.set("double_shadow", checked)
         if hasattr(self, "double_view"):
             self.double_view.set_shadow_enabled(checked)
+        epub_view = getattr(self, "epub_text_view", None)
+        if epub_view is not None:
+            epub_view.set_shadow_enabled(checked)
 
     # -------------------------------------------------- Fundo da página --
     def set_page_background(self, mode):
@@ -1529,13 +1848,10 @@ class MainWindow(QMainWindow):
         # o leitor textual do EPUB continua usando uma superfície neutra.
         stack_color = color if self.page_background != BG_CHECKER else BG_COLORS[BG_LIGHT]
         self.stack.setStyleSheet(f"QStackedWidget {{ background-color: {stack_color}; border: none; }}")
-        for attr in ("single_view", "continuous_view", "double_view"):
+        for attr in ("single_view", "continuous_view", "double_view", "epub_text_view"):
             view = getattr(self, attr, None)
             if view is not None:
                 view.set_background_color(color, checker=self.page_background == BG_CHECKER)
-        epub_view = getattr(self, "epub_text_view", None)
-        if epub_view is not None:
-            epub_view.set_background_color(stack_color)
 
     # --------------------------------------------------- Lente de aumento --
     def _on_magnifier_content_changed(self, *args):
@@ -1673,11 +1989,15 @@ class MainWindow(QMainWindow):
         view = EpubTextView()
         self.epub_text_view = view
         self.stack.addWidget(view)
+        self._enable_reader_context_menu(view)
+        view.pagination_changed.connect(self._on_epub_pagination_changed)
         self._apply_epub_text_settings()
-        color = BG_COLORS.get(self.page_background, BG_COLORS[BG_LIGHT])
-        if self.page_background == BG_CHECKER:
-            color = BG_COLORS[BG_LIGHT]
-        view.set_background_color(color)
+        view.set_background_color(
+            BG_COLORS.get(self.page_background, BG_COLORS[BG_LIGHT]),
+            checker=self.page_background == BG_CHECKER,
+        )
+        view.set_shadow_enabled(self.double_shadow)
+        view.set_mode("double" if self.mode == MODE_DOUBLE else "single")
         return view
 
     def _apply_epub_text_settings(self):
@@ -1686,8 +2006,85 @@ class MainWindow(QMainWindow):
             view.set_epub_settings(
                 self.settings.epub_font_family(),
                 self.settings.epub_font_size(),
-                self.settings.epub_text_width(),
+                self.settings.epub_theme(),
             )
+
+    def _refresh_epub_thumbnails(self):
+        if not self.archive or self.archive.kind != "epub" or not self.archive.has_text_pages():
+            return
+        self._prepare_thumbnail_scope()
+        if self.thumb_panel is not None and self.thumb_dock.isVisible():
+            self.thumb_panel.ensure_built()
+            self._sync_thumbnail_current(self.current_index)
+
+    def _set_epub_theme(self, theme):
+        self.settings.set_epub_theme(theme)
+        view = getattr(self, "epub_text_view", None)
+        if view is not None:
+            view.set_theme(self.settings.epub_theme())
+        self._refresh_epub_thumbnails()
+        self.statusBar().showMessage(tr("status.epub_updated"), 2500)
+
+    def _adjust_epub_font_size(self, delta):
+        size = max(10, min(36, self.settings.epub_font_size() + int(delta)))
+        self.settings.set_epub_settings(
+            self.settings.epub_font_family(), size, self.settings.epub_theme()
+        )
+        self._apply_epub_text_settings()
+        self._refresh_epub_thumbnails()
+        self.statusBar().showMessage(tr("status.epub_font_size", size=size), 2200)
+
+    def _on_epub_pagination_changed(self, start, end, total):
+        if not self.archive or not self.archive.is_text_page(self.current_index):
+            return
+        # Reaproveita a paginação que o leitor principal acabou de calcular.
+        # Se o painel de miniaturas for aberto depois, o capítulo atual não
+        # precisa passar por um segundo QTextDocument só para descobrir o total.
+        cache = getattr(self.archive, "_epub_thumbnail_page_count_cache", None)
+        if cache is None:
+            cache = {}
+            try:
+                setattr(self.archive, "_epub_thumbnail_page_count_cache", cache)
+            except Exception:
+                cache = None
+        if cache is not None:
+            cache[(
+                int(self.current_index),
+                self.settings.epub_font_family(),
+                self.settings.epub_font_size(),
+            )] = max(1, int(total))
+        if int(start) == int(end):
+            text = tr(
+                "epub.page_counter_single",
+                chapter=self.current_index + 1,
+                chapters=self._page_count(),
+                page=int(start) + 1,
+                total=int(total),
+            )
+        else:
+            text = tr(
+                "epub.page_counter_double",
+                chapter=self.current_index + 1,
+                chapters=self._page_count(),
+                start=int(start) + 1,
+                end=int(end) + 1,
+                total=int(total),
+            )
+        self.page_label.setText(text)
+        if self.thumb_panel is not None and self._epub_thumbnail_scope is not None:
+            self._sync_thumbnail_current(self.current_index)
+
+    def copy_epub_chapter_text(self):
+        if not self.archive or not self.archive.is_text_page(self.current_index):
+            return
+        try:
+            from bs4 import BeautifulSoup
+            html = self.archive.text_html(self.current_index)
+            text = BeautifulSoup(html, "html.parser").get_text("\n", strip=True)
+            QApplication.clipboard().setText(text)
+            self.statusBar().showMessage(tr("status.epub_text_copied"), 2200)
+        except Exception as exc:
+            show_warning(self, tr("dialog.unexpected_error"), str(exc))
 
     def open_epub_settings_dialog(self):
         from app.epub_settings_dialog import EpubSettingsDialog
@@ -1695,7 +2092,9 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             self._apply_epub_text_settings()
             if self.archive and self.archive.is_text_page(self.current_index):
-                self._ensure_epub_text_view().show_chapter(self.archive.text_html(self.current_index))
+                view = self._ensure_epub_text_view()
+                view.show_chapter(self.archive.text_html(self.current_index), reset=False)
+            self._refresh_epub_thumbnails()
             self.statusBar().showMessage(tr("status.epub_updated"), 4000)
 
     # -------------------------------------------------- Ajustes de imagem --
@@ -1927,6 +2326,9 @@ class MainWindow(QMainWindow):
         self._animation_sync_timer.start()
 
     def _handle_space(self):
+        if self.archive is not None and self.archive.kind == "video":
+            self.toggle_video_playback()
+            return
         if self.provider and self.provider.has_animation_activity():
             paused = self.provider.toggle_animation_pause()
             if paused is True:
@@ -1936,6 +2338,154 @@ class MainWindow(QMainWindow):
             return
         # Preserva a navegação por Espaço em páginas que não são animadas.
         self.next_page()
+
+    # ----------------------------------------------------------- Vídeo --
+    def toggle_video_playback(self):
+        view = getattr(self, "video_view", None)
+        if self.archive is not None and self.archive.kind == "video" and view is not None:
+            view.toggle_playback()
+
+    def set_video_audio_enabled(self, enabled):
+        enabled = bool(enabled)
+        self._video_audio_enabled = enabled
+        self.settings.set("video_audio_enabled", enabled)
+        self.act_video_audio.blockSignals(True)
+        self.act_video_audio.setChecked(enabled)
+        self.act_video_audio.blockSignals(False)
+        view = getattr(self, "video_view", None)
+        if view is not None and view.audio_enabled() != enabled:
+            view.set_audio_enabled(enabled, emit=False)
+
+    def _on_video_audio_changed(self, enabled):
+        self.set_video_audio_enabled(bool(enabled))
+
+    def _on_video_volume_changed(self, value):
+        self._video_volume = max(0, min(100, int(value)))
+        self.settings.set("video_volume", self._video_volume)
+
+    def set_video_repeat(self, enabled):
+        enabled = bool(enabled)
+        self._video_repeat = enabled
+        self.settings.set("video_repeat", enabled)
+        self.act_video_repeat.blockSignals(True)
+        self.act_video_repeat.setChecked(enabled)
+        self.act_video_repeat.blockSignals(False)
+        if enabled and self._video_auto_advance:
+            self._video_auto_advance = False
+            self.settings.set("video_auto_advance", False)
+            self.act_video_auto_advance.blockSignals(True)
+            self.act_video_auto_advance.setChecked(False)
+            self.act_video_auto_advance.blockSignals(False)
+
+    def set_video_auto_advance(self, enabled):
+        enabled = bool(enabled)
+        self._video_auto_advance = enabled
+        self.settings.set("video_auto_advance", enabled)
+        self.act_video_auto_advance.blockSignals(True)
+        self.act_video_auto_advance.setChecked(enabled)
+        self.act_video_auto_advance.blockSignals(False)
+        if enabled and self._video_repeat:
+            self._video_repeat = False
+            self.settings.set("video_repeat", False)
+            self.act_video_repeat.blockSignals(True)
+            self.act_video_repeat.setChecked(False)
+            self.act_video_repeat.blockSignals(False)
+
+    def set_video_speed(self, value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = 1.0
+        if value not in self.video_speed_actions:
+            value = 1.0
+        self._video_speed = value
+        self.settings.set("video_speed", value)
+        for speed, action in self.video_speed_actions.items():
+            action.blockSignals(True)
+            action.setChecked(speed == value)
+            action.blockSignals(False)
+        view = getattr(self, "video_view", None)
+        if view is not None:
+            view.set_playback_rate(value)
+
+    def _on_video_ended(self):
+        if not self.archive or self.archive.kind != "video":
+            return
+        view = getattr(self, "video_view", None)
+        if self._video_repeat and view is not None:
+            view.restart()
+            return
+        if self._video_auto_advance:
+            # Adia a troca de arquivo até o sinal EndOfMedia terminar de ser
+            # processado pelo backend multimídia atual.
+            QTimer.singleShot(0, self.next_page)
+
+    @staticmethod
+    def _video_frame_time_tag(position_ms):
+        total_ms = max(0, int(position_ms))
+        milliseconds = total_ms % 1000
+        total_seconds = total_ms // 1000
+        hours, rem = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(rem, 60)
+        if hours:
+            return f"{hours:02d}-{minutes:02d}-{seconds:02d}-{milliseconds:03d}"
+        return f"{minutes:02d}-{seconds:02d}-{milliseconds:03d}"
+
+    def save_current_video_frame(self):
+        if not self.archive or self.archive.kind != "video":
+            return
+        view = getattr(self, "video_view", None)
+        if view is None:
+            return
+        image = view.current_frame_image()
+        if image is None or image.isNull():
+            show_information(
+                self, tr("dialog.save_video_frame"),
+                tr("video.frame_unavailable"),
+            )
+            return
+
+        from PIL import Image
+        from app.save_helpers import still_image_save_filter, ensure_extension, save_converted_image
+
+        if self.collection is not None and self.collection_index is not None:
+            source_name = self.collection.member_display_name(self.collection_index)
+        else:
+            source_name = Path(self.archive.path).name
+        stem = Path(str(source_name)).stem or "video"
+        tag = self._video_frame_time_tag(view.position())
+        suggested = f"{stem}_frame_{tag}.png"
+        selected, selected_filter = QFileDialog.getSaveFileName(
+            self, tr("dialog.save_video_frame"),
+            str(self._save_dialog_directory() / suggested),
+            still_image_save_filter(),
+        )
+        if not selected:
+            return
+        target = ensure_extension(selected, selected_filter)
+        if target.exists() and not self._ask_yes_no(
+            tr("dialog.replace_files"), tr("save.replace_prompt")
+        ):
+            return
+
+        try:
+            qimg = image.convertToFormat(QImage.Format_RGBA8888)
+            raw = qimg.bits().tobytes()
+            pil = Image.frombuffer(
+                "RGBA", (qimg.width(), qimg.height()), raw, "raw",
+                "RGBA", qimg.bytesPerLine(), 1,
+            ).copy()
+            save_converted_image(pil, target)
+            self._session_save_dir = str(target.parent)
+            self.statusBar().showMessage(
+                tr("status.video_frame_saved", path=str(target)), 5000
+            )
+        except Exception as exc:  # noqa: BLE001
+            show_warning(self, tr("dialog.save_error"), str(exc))
+
+    def _on_video_playback_error(self, message):
+        if message:
+            self.statusBar().showMessage(tr("status.video_error", error=message), 7000)
 
     # ----------------------------------------------------- Apresentação --
     def start_slideshow(self):
@@ -2018,7 +2568,7 @@ class MainWindow(QMainWindow):
     def _page_count(self):
         return self.archive.count() if self.archive else 0
 
-    def go_to_page(self, index):
+    def go_to_page(self, index, epub_position=None):
         if not self.archive:
             return
         index = max(0, min(index, self._page_count() - 1))
@@ -2027,66 +2577,124 @@ class MainWindow(QMainWindow):
         if index != old_index and self._color_picker is not None:
             self._color_picker.reset_selection()
 
+        is_video = self.archive.kind == "video"
         is_text = self.archive.is_text_page(index)
-        if is_text:
+        epub_view = None
+        if is_video:
+            view = getattr(self, "video_view", None)
+            if view is not None:
+                self.stack.setCurrentWidget(view)
+                source = str(self.archive.path)
+                if view.source_path != source:
+                    view.open(source, autoplay=True)
+        elif is_text:
             epub_view = self._ensure_epub_text_view()
-            epub_view.show_chapter(self.archive.text_html(index))
+            epub_view.set_mode("double" if self.mode == MODE_DOUBLE else "single")
+            epub_view.show_chapter(
+                self.archive.text_html(index),
+                reset=(index != old_index or epub_position in ("first", "last")),
+            )
+            if epub_position == "last":
+                epub_view.go_last()
+            elif epub_position == "first":
+                epub_view.go_first()
             self.stack.setCurrentWidget(epub_view)
         elif self.archive.has_text_pages() or self.archive.kind == "image":
-            # EPUB misto e imagens avulsas sempre usam a visualização de
-            # página única. No EPUB, isso também evita spreads atravessando
-            # capítulos textuais.
+            # EPUB misto: imagens continuam isoladas; o spread duplo vale para
+            # os capítulos de texto e jamais mistura tipos diferentes.
             self.stack.setCurrentWidget(self.single_view)
             self.single_view.show_page(index)
         elif self.mode == MODE_SINGLE:
             self.stack.setCurrentWidget(self.single_view)
             self.single_view.show_page(index)
         elif self.mode == MODE_CONTINUOUS:
-            self.stack.setCurrentWidget(self.continuous_view)
-            self.continuous_view.scroll_to(index)
+            view = self._ensure_continuous_view()
+            if view.total != self.archive.count():
+                view.build(self.archive.count())
+            self.stack.setCurrentWidget(view)
+            view.scroll_to(index)
         else:
-            self.stack.setCurrentWidget(self.double_view)
-            self.double_view.show_spread(index, self._page_count())
+            view = self._ensure_double_view()
+            self.stack.setCurrentWidget(view)
+            view.show_spread(index, self._page_count())
 
-        self.act_save_page.setEnabled(not is_text)
+        self.act_save_page.setEnabled(not is_text and not is_video)
         self._update_image_actions()
         self._refresh_magnifier_target()
         self._refresh_color_picker_target()
         self.slider.blockSignals(True)
         self.slider.setValue(index)
         self.slider.blockSignals(False)
-        self.page_label.setText(tr("page.counter", current=index + 1, total=self._page_count()))
+        if is_text:
+            self._on_epub_pagination_changed(
+                epub_view.spread_start_index(), epub_view.spread_end_index(), epub_view.page_count()
+            )
+        elif is_video:
+            self.page_label.setText(tr("video.now_playing"))
+        else:
+            self.page_label.setText(tr("page.counter", current=index + 1, total=self._page_count()))
         self._sync_thumbnail_current(index)
-        if self.mode == MODE_CONTINUOUS and self.stack.currentWidget() is self.continuous_view:
+        if self.mode == MODE_CONTINUOUS and self.stack.currentWidget() is getattr(self, "continuous_view", None):
             self._schedule_animation_sync()
         else:
             self._animation_sync_timer.stop()
             self._sync_active_animations()
         self._save_progress()
 
+    def _double_page_navigation_active(self):
+        """Retorna True somente quando a view dupla realmente está ativa.
+
+        Arquivos avulsos de imagem e vídeo possuem uma única página e não
+        criam ``double_view``.  O modo global pode continuar salvo como duplo
+        de uma leitura anterior; portanto a navegação nunca deve inferir a
+        existência da view apenas a partir de ``self.mode``.
+        """
+        if (
+            not self.archive
+            or self.mode != MODE_DOUBLE
+            or self.archive.has_text_pages()
+            or self.archive.kind in ("image", "video")
+        ):
+            return False
+        view = getattr(self, "double_view", None)
+        return view is not None and self.stack.currentWidget() is view
+
     def next_page(self):
         if not self.archive:
             return
-        if self.mode == MODE_DOUBLE and not self.archive.has_text_pages() and self.archive.kind != "image":
+        if self.archive.is_text_page(self.current_index):
+            view = self._ensure_epub_text_view()
+            if view.next_pages():
+                return
+            nxt = self.current_index + 1
+        elif self._double_page_navigation_active():
             nxt = self.double_view.spread_end_index() + 1
         else:
+            # Imagem/vídeo avulso cai aqui: como count()==1, o índice seguinte
+            # ultrapassa o documento e _load_sibling_archive() abre o próximo
+            # arquivo suportado da pasta (imagem, vídeo, CBZ/CBR, PDF, EPUB...).
             nxt = self.current_index + 1
         if nxt >= self._page_count():
             self._load_sibling_archive(+1)
             return
-        self.go_to_page(nxt)
+        self.go_to_page(nxt, epub_position="first")
 
     def prev_page(self):
         if not self.archive:
             return
-        if self.mode == MODE_DOUBLE and not self.archive.has_text_pages() and self.archive.kind != "image":
+        if self.archive.is_text_page(self.current_index):
+            view = self._ensure_epub_text_view()
+            if view.prev_pages():
+                return
+            prv = self.current_index - 1
+        elif self._double_page_navigation_active():
             prv = self.double_view.spread_start_index() - 1
         else:
             prv = self.current_index - 1
         if prv < 0:
             self._load_sibling_archive(-1)
             return
-        self.go_to_page(prv)
+        self.go_to_page(prv, epub_position="last")
 
     # ------------------------------------------ Avançar/voltar entre arquivos --
     def _find_sibling_archive(self, direction):
@@ -2162,7 +2770,7 @@ class MainWindow(QMainWindow):
         self.open_path(str(sibling))
         if direction < 0 and self.archive:
             # Ao voltar para o arquivo anterior, começa pela última página dele.
-            self.go_to_page(self._page_count() - 1)
+            self.go_to_page(self._page_count() - 1, epub_position="last")
         self.statusBar().showMessage(
             tr("status.auto_loaded", name=sibling.name), 4000
         )
@@ -3102,6 +3710,9 @@ class MainWindow(QMainWindow):
             self.statusBar().hide()
             self.menuBar().hide()
             self._enter_image_only_frame()
+            video_view = getattr(self, "video_view", None)
+            if video_view is not None:
+                video_view.set_controls_visible(False)
             self._refresh_edge_to_edge_mode()
             self._show_cursor_temporarily()
         else:
@@ -3111,6 +3722,9 @@ class MainWindow(QMainWindow):
             self.menuBar().show()
             self.bottom_bar.show()
             self.statusBar().show()
+            video_view = getattr(self, "video_view", None)
+            if video_view is not None:
+                video_view.set_controls_visible(True)
             self._cursor_hide_timer.stop()
             self._show_cursor_temporarily()
             if self._interface_prev_thumbs:
@@ -3259,15 +3873,16 @@ class MainWindow(QMainWindow):
         self._thumbnail_member_map = None
         self._thumbnail_member_row = None
         self._thumbnail_scope_archive = None
+        self._epub_thumbnail_scope = None
 
         scope = self.archive
         if (
             self.collection is not None
             and self.collection_index is not None
-            and self.collection.member_kind(self.collection_index) == "image"
+            and self.collection.member_kind(self.collection_index) in ("image", "video")
         ):
-            from app.compressed_collection import CollectionImageGroupArchive
-            group = CollectionImageGroupArchive(self.collection)
+            from app.compressed_collection import CollectionMediaGroupArchive
+            group = CollectionMediaGroupArchive(self.collection)
             self._thumbnail_scope_archive = group
             self._thumbnail_member_map = list(group.member_indices)
             self._thumbnail_member_row = {
@@ -3275,6 +3890,20 @@ class MainWindow(QMainWindow):
                 for row, member_index in enumerate(self._thumbnail_member_map)
             }
             scope = group
+        elif self.archive is not None and self.archive.kind == "epub" and self.archive.has_text_pages():
+            # Diferentemente do índice do ComicArchive (que tem um item por
+            # capítulo textual), o painel expande o EPUB em páginas visuais
+            # reais, iguais às folhas fixas mostradas pelo leitor.
+            from app.epub_view import EpubThumbnailArchive
+            epub_scope = EpubThumbnailArchive(
+                self.archive,
+                self.settings.epub_font_family(),
+                self.settings.epub_font_size(),
+                self.settings.epub_theme(),
+            )
+            self._epub_thumbnail_scope = epub_scope
+            self._thumbnail_scope_archive = epub_scope
+            scope = epub_scope
 
         self._thumbnail_scope_pending = scope
         if self.thumb_panel is not None:
@@ -3288,6 +3917,13 @@ class MainWindow(QMainWindow):
             if 0 <= row < len(self._thumbnail_member_map):
                 self._open_collection_member(self._thumbnail_member_map[row])
             return
+        if self._epub_thumbnail_scope is not None:
+            archive_index, inner_page, is_text = self._epub_thumbnail_scope.position(int(row))
+            self.go_to_page(archive_index, epub_position="first" if is_text else None)
+            if is_text:
+                view = self._ensure_epub_text_view()
+                view.go_to_page(int(inner_page or 0))
+            return
         self.go_to_page(int(row))
 
     def _sync_thumbnail_current(self, page_index):
@@ -3299,6 +3935,16 @@ class MainWindow(QMainWindow):
             if mapped is None:
                 return
             row = int(mapped)
+        elif self._epub_thumbnail_scope is not None:
+            # Não force a paginação de todo o livro só para manter um estado
+            # invisível. O mapa completo é criado quando o painel é aberto.
+            if self.thumb_panel is None:
+                return
+            inner_page = None
+            if self.archive is not None and self.archive.is_text_page(int(page_index)):
+                view = getattr(self, "epub_text_view", None)
+                inner_page = view.spread_start_index() if view is not None else 0
+            row = self._epub_thumbnail_scope.row_for_source(int(page_index), inner_page)
         self._thumbnail_current_pending = row
         if self.thumb_panel is not None:
             self.thumb_panel.set_current(row)
@@ -3349,6 +3995,7 @@ class MainWindow(QMainWindow):
         self.act_thumbs.setChecked(visible)
         if visible:
             self._ensure_thumb_panel().ensure_built()
+            self._sync_thumbnail_current(self.current_index)
             QTimer.singleShot(0, self._widen_thumb_dock)
 
     def _update_ui_enabled(self, enabled):
@@ -3356,13 +4003,17 @@ class MainWindow(QMainWindow):
                   self.act_first, self.act_last, self.act_summary, self.act_zoom_in,
                   self.act_zoom_out, self.act_zoom_100, self.act_zoom_200, self.act_copy_path,
                   self.act_slideshow_start, self.act_slideshow_pause, self.act_slideshow_stop,
-                  self.act_reveal_file, self.act_animation_prev_frame, self.act_animation_next_frame, self.act_save_animation_frame):
+                  self.act_reveal_file, self.act_animation_prev_frame, self.act_animation_next_frame, self.act_save_animation_frame,
+                  self.act_video_play_pause, self.act_video_audio, self.act_save_video_frame,
+                  self.act_video_repeat, self.act_video_auto_advance):
             a.setEnabled(enabled)
         mutation_enabled = bool(enabled and self._file_mutations_allowed())
         for action in (self.act_rename_file, self.act_move_file, self.act_copy_file_to, self.act_delete_file):
             action.setEnabled(mutation_enabled)
         self.slider.setEnabled(enabled)
         if not enabled:
+            for action in self.video_speed_actions.values():
+                action.setEnabled(False)
             for action in (self.act_rotate_left, self.act_rotate_right, self.act_flip_horizontal, self.act_flip_vertical, self.act_set_wallpaper, self.act_magnifier, self.act_color_picker, self.act_crop, self.act_compare):
                 action.setEnabled(False)
             if self._magnifier is not None:
@@ -3373,13 +4024,35 @@ class MainWindow(QMainWindow):
             self._update_image_actions()
 
     def _update_image_actions(self):
+        is_video = bool(self.archive and self.archive.kind == "video")
         enabled = bool(
             self.archive
+            and not is_video
             and 0 <= self.current_index < self.archive.count()
             and not self.archive.is_text_page(self.current_index)
         )
         for action in (self.act_rotate_left, self.act_rotate_right, self.act_flip_horizontal, self.act_flip_vertical, self.act_set_wallpaper, self.act_magnifier, self.act_color_picker, self.act_crop, self.act_compare, self.act_copy_image):
             action.setEnabled(enabled)
+        for action in (self.act_save_changes, self.act_batch_export, self.act_adjustments, self.act_reset_adjustments):
+            action.setEnabled(bool(enabled and self.provider is not None))
+        for action in (self.act_animation_prev_frame, self.act_animation_next_frame, self.act_save_animation_frame):
+            action.setEnabled(bool(enabled and self.provider is not None))
+        if hasattr(self, "act_video_play_pause"):
+            for action in (
+                self.act_video_play_pause, self.act_video_audio, self.act_save_video_frame,
+                self.act_video_repeat, self.act_video_auto_advance,
+            ):
+                action.setEnabled(is_video)
+            for action in self.video_speed_actions.values():
+                action.setEnabled(is_video)
+        for action in (self.act_zoom_in, self.act_zoom_out, self.act_zoom_100, self.act_zoom_200,
+                       self.act_fit_width, self.act_fit_height, self.act_fit_page,
+                       self.act_layout_centered, self.act_layout_full_width, self.act_double_shadow):
+            action.setEnabled(not is_video)
+        for action in self.animation_speed_actions.values():
+            action.setEnabled(not is_video)
+        for action in (self.act_slideshow_start, self.act_slideshow_pause, self.act_slideshow_stop):
+            action.setEnabled(not is_video)
         self._refresh_magnifier_target()
         self._refresh_color_picker_target()
 
@@ -3404,6 +4077,10 @@ class MainWindow(QMainWindow):
     def register_image_file_types(self):
         from app.win_registration import register_images
         self._show_registration_result(*register_images())
+
+    def register_video_file_types(self):
+        from app.win_registration import register_videos
+        self._show_registration_result(*register_videos())
 
     def unregister_file_types(self):
         from app.win_registration import unregister
@@ -3458,6 +4135,9 @@ class MainWindow(QMainWindow):
             self.act_reset_adjustments: "action.reset_adjustments", self.act_shortcuts: "action.shortcuts", self.act_restore_session: "action.restore_session", self.act_animation_prev_frame: "action.animation_prev_frame", self.act_animation_next_frame: "action.animation_next_frame", self.act_save_animation_frame: "action.save_animation_frame", self.act_epub_settings: "action.epub",
             self.act_register: "action.register_comics", self.act_register_epub: "action.register_epub",
             self.act_register_pdf: "action.register_pdf", self.act_register_images: "action.register_images",
+            self.act_register_videos: "action.register_videos", self.act_video_play_pause: "action.video_play_pause",
+            self.act_video_audio: "action.video_audio", self.act_save_video_frame: "action.save_video_frame",
+            self.act_video_repeat: "action.video_repeat", self.act_video_auto_advance: "action.video_auto_advance",
             self.act_unregister: "action.unregister", self.act_language: "action.language",
             self.act_about: "action.about",
         }
@@ -3467,6 +4147,8 @@ class MainWindow(QMainWindow):
             action.setText(tr("action.slideshow_interval", seconds=seconds))
         for speed, action in self.animation_speed_actions.items():
             action.setText(tr("action.animation_speed", speed=speed))
+        for speed, action in self.video_speed_actions.items():
+            action.setText(tr("action.video_speed", speed=f"{speed:g}"))
         for mode, key in (("name","action.sort_name"),("date","action.sort_date"),("size","action.sort_size"),("extension","action.sort_extension")):
             self.folder_sort_actions[mode].setText(tr(key))
         self.act_sort_desc.setText(tr("action.sort_descending"))
@@ -3477,7 +4159,7 @@ class MainWindow(QMainWindow):
         self.menu_view.setTitle(tr("menu.view")); self.menu_tools.setTitle(tr("menu.tools"))
         self.menu_help.setTitle(tr("menu.help")); self.recent_menu.setTitle(tr("menu.recent"))
         self.menu_bg.setTitle(tr("menu.page_background")); self.menu_assoc.setTitle(tr("menu.file_association"))
-        self.menu_slideshow.setTitle(tr("menu.slideshow")); self.menu_slideshow_interval.setTitle(tr("menu.slideshow_interval")); self.menu_sort.setTitle(tr("menu.sort")); self.menu_animation.setTitle(tr("menu.animation"))
+        self.menu_slideshow.setTitle(tr("menu.slideshow")); self.menu_slideshow_interval.setTitle(tr("menu.slideshow_interval")); self.menu_sort.setTitle(tr("menu.sort")); self.menu_animation.setTitle(tr("menu.animation")); self.menu_video.setTitle(tr("menu.video")); self.menu_video_speed.setTitle(tr("menu.video_speed"))
         self.thumb_dock.setWindowTitle(tr("dock.thumbnails")); self.bookmark_dock.setWindowTitle(tr("dock.bookmarks")); self.favorite_dock.setWindowTitle(tr("dock.favorites"))
         if self.bookmark_panel is not None:
             self.bookmark_panel.retranslate_ui()
@@ -3486,7 +4168,17 @@ class MainWindow(QMainWindow):
         self._refresh_recent_menu()
         total = self._page_count() if self.archive is not None else 0
         current = self.current_index + 1 if total > 0 else 0
-        self.page_label.setText(tr("page.counter", current=current, total=total))
+        if self.archive is not None and self.archive.kind == "video":
+            self.page_label.setText(tr("video.now_playing"))
+        else:
+            self.page_label.setText(tr("page.counter", current=current, total=total))
+        if (self.archive is not None and total > 0
+                and self.archive.is_text_page(self.current_index)):
+            view = getattr(self, "epub_text_view", None)
+            if view is not None:
+                self._on_epub_pagination_changed(
+                    view.spread_start_index(), view.spread_end_index(), view.page_count()
+                )
 
         if self._adjustments_dialog is not None:
             self._adjustments_dialog.retranslate_ui()
@@ -3496,7 +4188,7 @@ class MainWindow(QMainWindow):
             self.thumb_panel.retranslate_ui()
         if self._color_picker is not None:
             self._color_picker.retranslate_ui()
-        for view_name in ("single_view", "double_view", "continuous_view"):
+        for view_name in ("single_view", "double_view", "continuous_view", "video_view"):
             view = getattr(self, view_name, None)
             if view is not None and hasattr(view, "retranslate_ui"):
                 view.retranslate_ui()
@@ -3552,22 +4244,29 @@ class MainWindow(QMainWindow):
             # Independe de existir uma imagem aberta: maximizar/restaurar a
             # janela deve atualizar imediatamente a borda externa do DWM.
             self._queue_native_window_edge_sync()
-            if self.provider is not None:
+            if self.archive is not None:
+                video_view = getattr(self, "video_view", None)
                 if self.isMinimized():
-                    # Nada é visível: zera CPU de GIF/WebM enquanto minimizado.
+                    if video_view is not None:
+                        video_view.pause_for_minimize()
+                    # Nada é visível: zera CPU de animações enquanto minimizado.
                     self._animation_sync_timer.stop()
-                    self.provider.set_animation_indices([])
+                    if self.provider is not None:
+                        self.provider.set_animation_indices([])
                     if self._magnifier is not None:
                         self._magnifier.set_enabled(False)
                     if self._color_picker is not None:
                         self._color_picker.set_enabled(False)
-                elif self.archive is not None:
+                else:
+                    if video_view is not None:
+                        video_view.resume_after_minimize()
                     self._refresh_magnifier_target()
                     self._refresh_color_picker_target()
-                    if self.mode == MODE_CONTINUOUS and hasattr(self, "continuous_view"):
-                        self._schedule_animation_sync()
-                    else:
-                        self._sync_active_animations()
+                    if self.provider is not None:
+                        if self.mode == MODE_CONTINUOUS and hasattr(self, "continuous_view"):
+                            self._schedule_animation_sync()
+                        else:
+                            self._sync_active_animations()
 
     def closeEvent(self, event):
         if self.settings.restore_session_enabled():

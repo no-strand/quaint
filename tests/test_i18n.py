@@ -160,7 +160,8 @@ def main():
                 continue
             if Path(value).suffix.lower() in {
                 ".png", ".jpg", ".jpeg", ".jfif", ".webp", ".gif",
-                ".tif", ".tiff", ".bmp", ".ico", ".webm", ".cbz",
+                ".tif", ".tiff", ".bmp", ".ico", ".mp4", ".mkv", ".avi",
+                ".mov", ".m4v", ".webm", ".wmv", ".mpg", ".mpeg", ".cbz",
                 ".cbr", ".zip", ".rar", ".7z", ".pdf", ".epub",
                 ".json", ".html", ".xhtml", ".xml", ".opf",
             }:

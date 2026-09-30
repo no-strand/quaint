@@ -2,7 +2,7 @@
 
 O cache guarda apenas nomes/ordem, nunca pixels.  Ele acelera reaberturas de
 pastas e CBZ/CBR enormes sem manter uma base de dados pesada.  A assinatura usa
-mtime/tamanho; quando a coleção muda, o índice é descartado automaticamente.
+mtime/tamanho e uma versão de esquema; quando a coleção ou a classificação de formatos muda, o índice é descartado automaticamente.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-_CACHE_VERSION = 3
+_CACHE_VERSION = 4
 _WRITE_LOCK = threading.Lock()
 _QUEUE_LOCK = threading.Lock()
 _WRITE_QUEUE = queue.Queue()

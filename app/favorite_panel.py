@@ -11,7 +11,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QSize, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from app.archive import ArchiveError, ComicArchive, STANDALONE_IMAGE_EXTS
+from app.archive import ArchiveError, ComicArchive, STANDALONE_IMAGE_EXTS, VIDEO_EXTS
 from app.compressed_collection import (
     CompressedComicCollection, DirectoryComicCollection, is_container_path,
 )
@@ -29,6 +29,27 @@ CARD_WIDTH = 194
 CARD_HEIGHT = 286
 THUMB_WIDTH = 176
 THUMB_HEIGHT = 218
+
+
+def _video_placeholder_image(max_dim=360):
+    """Cheap static preview; deliberately never probes/decodes the video."""
+    h = max(120, int(max_dim))
+    w = max(96, int(h * 0.72))
+    img = Image.new("RGB", (w, h), (23, 23, 29))
+    draw = ImageDraw.Draw(img)
+    margin = max(8, int(min(w, h) * 0.08))
+    body = (margin, margin, w - margin, h - margin)
+    draw.rounded_rectangle(body, radius=max(5, margin // 2), fill=(36, 36, 45), outline=(91, 91, 104), width=max(1, margin // 5))
+    cx, cy = w // 2, h // 2
+    size = int(min(w, h) * 0.18)
+    draw.polygon([(cx - size // 2, cy - size), (cx - size // 2, cy + size), (cx + size, cy)], fill=(232, 232, 239))
+    hole_w = max(3, int(w * 0.04)); hole_h = max(4, int(h * 0.035)); step = max(12, hole_h * 2)
+    y = margin + hole_h
+    while y + hole_h < h - margin:
+        draw.rounded_rectangle((margin + 5, y, margin + 5 + hole_w, y + hole_h), radius=1, fill=(119,119,134))
+        draw.rounded_rectangle((w - margin - 5 - hole_w, y, w - margin - 5, y + hole_h), radius=1, fill=(119,119,134))
+        y += step
+    return img
 
 
 def _preview_cache_dir():
@@ -101,7 +122,9 @@ def favorite_preview_png(path, max_dim=360):
     archive = None
     collection = None
     try:
-        if p.is_dir():
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
+            img = _video_placeholder_image(max_dim)
+        elif p.is_dir():
             # Pastas comuns com imagens são rápidas pelo ComicArchive. Se a
             # pasta contiver apenas CBZ/CBR/compactados, cai para a coleção.
             try:
@@ -240,6 +263,8 @@ class _FavoriteCard(QFrame):
             return tr("favorite.folder")
         if p.suffix.lower() in STANDALONE_IMAGE_EXTS:
             return tr("favorite.image")
+        if p.suffix.lower() in VIDEO_EXTS:
+            return tr("favorite.video")
         return tr("favorite.file")
 
     def set_thumbnail_bytes(self, data):

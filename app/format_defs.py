@@ -13,11 +13,13 @@ IMG_EXTS = {
     ".tif", ".tiff", ".ico", ".avif", ".heic", ".heif", ".jxl",
     ".svg", ".svgz",
 }
-STANDALONE_IMAGE_EXTS = IMG_EXTS | {".webm"}
+STANDALONE_IMAGE_EXTS = set(IMG_EXTS)
+VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".wmv", ".mpg", ".mpeg"}
 SUPPORTED_FILE_EXTS = {
     ".cbz", ".cbr", ".pdf", ".epub",
     ".zip", ".rar", ".7z", ".tar", ".tgz", ".tbz2", ".txz",
     *STANDALONE_IMAGE_EXTS,
+    *VIDEO_EXTS,
 }
 CONTAINER_SUFFIXES = (
     ".zip", ".rar", ".7z", ".tar", ".tgz", ".tar.gz", ".tar.bz2",

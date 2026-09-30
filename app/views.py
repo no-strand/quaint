@@ -219,6 +219,8 @@ class SinglePageView(_ZoomPanMixin, QScrollArea):
         self.index = index
         self._orig_pixmap = None
         self._animated_frame = False
+        # Saltos rápidos não devem deixar páginas antigas aguardando decode.
+        self.provider.retain_indices([index])
         pix = self.provider.get(index, priority=100)
         if pix is not None:
             self._set_pixmap(pix)
@@ -457,6 +459,7 @@ class DoublePageView(_ZoomPanMixin, QScrollArea):
         left, right = (b, a) if self.direction == "rtl" else (a, b)
         self.left_index, self.right_index = left, right
         self._prefetch_anchor = int(anchor_index)
+        self.provider.retain_indices(i for i in (left, right) if i is not None)
         ready_a = self._load(self.label_a, left, "right")
         ready_b = self._load(self.label_b, right, "left")
         if ready_a or ready_b:
@@ -856,6 +859,9 @@ class ContinuousView(_ZoomPanMixin, QScrollArea):
             if d < best_d:
                 best_d, best_i = d, logical
 
+        # Descarta decodes ainda enfileirados de páginas que saíram da área
+        # relevante; em saltos grandes isso libera CPU/disco para a nova janela.
+        self.provider.retain_indices(visible_indices)
         # Preload explícito segue a janela visível, não o tamanho total.
         if visible_indices:
             self.provider.preload_indices(visible_indices[:12], base_priority=35)

@@ -29,11 +29,20 @@ FILE_TYPE_GROUPS = {
         "prog_id": "Quaint.ImageFile",
         "extensions": (
             ".jpg", ".jpeg", ".jfif", ".png", ".webp", ".gif",
-            ".tif", ".tiff", ".bmp", ".ico", ".webm",
+            ".tif", ".tiff", ".bmp", ".ico",
             ".avif", ".heic", ".heif", ".jxl", ".svg", ".svgz",
         ),
         "description_key": "registration.image_description",
         "success_key": "registration.images_success",
+    },
+    "videos": {
+        "prog_id": "Quaint.VideoFile",
+        "extensions": (
+            ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm",
+            ".wmv", ".mpg", ".mpeg",
+        ),
+        "description_key": "registration.video_description",
+        "success_key": "registration.videos_success",
     },
 }
 
@@ -121,6 +130,10 @@ def register_pdf():
 
 def register_images():
     return register_group("images")
+
+
+def register_videos():
+    return register_group("videos")
 
 
 def unregister():

@@ -8,7 +8,8 @@ def test_drop_validation_uses_every_supported_format():
     # O drop reutiliza exatamente as mesmas fontes de verdade do fluxo Abrir.
     expected_regular = {
         ".jpg", ".jpeg", ".jfif", ".png", ".webp", ".gif", ".tif", ".tiff",
-        ".bmp", ".ico", ".webm", ".cbz", ".cbr", ".pdf", ".epub",
+        ".bmp", ".ico", ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm",
+        ".wmv", ".mpg", ".mpeg", ".cbz", ".cbr", ".pdf", ".epub",
         ".zip", ".rar", ".7z", ".tar", ".tgz", ".tbz2", ".txz",
     }
     assert expected_regular <= SUPPORTED_FILE_EXTS

@@ -8,7 +8,8 @@ from app.i18n import DEFAULT_LOCALE
 
 DEFAULT_EPUB_FONT = "Georgia"
 DEFAULT_EPUB_FONT_SIZE = 17
-DEFAULT_EPUB_TEXT_WIDTH = 820
+DEFAULT_EPUB_TEXT_WIDTH = 820  # legado: páginas textuais agora têm largura fixa
+DEFAULT_EPUB_THEME = "light"
 
 
 class Settings:
@@ -165,15 +166,38 @@ class Settings:
             return DEFAULT_EPUB_FONT_SIZE
 
     def epub_text_width(self):
+        """Compatibilidade com configurações antigas.
+
+        O leitor paginado usa uma folha fixa e não depende mais deste valor.
+        """
         try:
             return max(520, min(1400, int(self.get("epub_text_width", DEFAULT_EPUB_TEXT_WIDTH))))
         except (TypeError, ValueError):
             return DEFAULT_EPUB_TEXT_WIDTH
 
-    def set_epub_settings(self, font_family, font_size, text_width):
+    def epub_theme(self):
+        value = str(self.get("epub_theme", DEFAULT_EPUB_THEME) or DEFAULT_EPUB_THEME).lower()
+        return value if value in ("light", "dark", "sepia") else DEFAULT_EPUB_THEME
+
+    def set_epub_theme(self, theme):
+        theme = str(theme or DEFAULT_EPUB_THEME).lower()
+        if theme not in ("light", "dark", "sepia"):
+            theme = DEFAULT_EPUB_THEME
+        self.set("epub_theme", theme)
+
+    def set_epub_settings(self, font_family, font_size, theme=None):
         self.set("epub_font_family", str(font_family or DEFAULT_EPUB_FONT))
         self.set("epub_font_size", int(font_size))
-        self.set("epub_text_width", int(text_width))
+        # Aceita silenciosamente o antigo terceiro argumento numérico
+        # (text_width), para não quebrar configurações/testes de versões
+        # anteriores. Novas chamadas passam light/dark/sepia.
+        if isinstance(theme, str):
+            self.set_epub_theme(theme)
+        elif theme is not None:
+            try:
+                self.set("epub_text_width", int(theme))
+            except (TypeError, ValueError):
+                pass
 
     # ------------------------------------------------------- Ajustes de imagem --
     def get_adjustments(self):

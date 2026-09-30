@@ -14,6 +14,15 @@ def image_save_filter():
     ))
 
 
+def still_image_save_filter():
+    """Formatos estáticos para capturas de frame de vídeo."""
+    return ";;".join((
+        tr("save_filter.png"), tr("save_filter.jpeg"), tr("save_filter.webp"),
+        tr("save_filter.gif"), tr("save_filter.tiff"), tr("save_filter.bmp"),
+        tr("save_filter.ico"),
+    ))
+
+
 READABLE_IMAGE_EXTS = {
     ".png", ".jpg", ".jpeg", ".jfif", ".webp", ".gif",
     ".tif", ".tiff", ".bmp", ".ico", ".webm",
