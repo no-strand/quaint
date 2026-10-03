@@ -18,19 +18,6 @@ It supports **CBZ, CBR, EPUB and PDF**, while also working as a fast and versati
 
 ---
 
-## Features
-
-- Single-page, double-page and continuous reading
-- Zoom, rotation and fullscreen
-- Image adjustments and filters
-- Thumbnails, bookmarks and favorites
-- Crop and image comparison
-- Slideshow
-- Batch export
-- Drag and drop support
-
----
-
 <div align="center">
 
 **Simple. Fast. Focused on reading.**
