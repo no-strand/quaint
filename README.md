@@ -4,7 +4,7 @@
 
 ### A lightweight viewer for manga, comics and images
 
-**CBZ · CBR · EPUB · PDF · Images · Folders**
+**ZIP · CBZ · CBR · EPUB · PDF · Images · Folders**
 
 </div>
 
