@@ -514,5 +514,9 @@
   "menu.video_speed": "Velocidade",
   "dialog.save_video_frame": "Salvar frame atual",
   "video.frame_unavailable": "Ainda não há um frame de vídeo disponível para salvar.",
-  "status.video_frame_saved": "Frame salvo em {path}"
+  "status.video_frame_saved": "Frame salvo em {path}",
+  "video.repeat_enable": "Repetir vídeo",
+  "video.repeat_disable": "Parar de repetir o vídeo",
+  "video.speed_slower": "Diminuir velocidade do vídeo",
+  "video.speed_faster": "Aumentar velocidade do vídeo"
 }

@@ -37,11 +37,15 @@ def _clock(ms: int) -> str:
 class VideoView(QWidget):
     audio_enabled_changed = Signal(bool)
     volume_changed = Signal(int)
+    repeat_changed = Signal(bool)
+    playback_rate_changed = Signal(float)
     playback_error = Signal(str)
     ended = Signal()
 
+    PLAYBACK_RATES = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
+
     def __init__(self, *, audio_enabled=False, volume=75, playback_rate=1.0,
-                 icons_dir=None, parent=None):
+                 repeat_enabled=False, icons_dir=None, parent=None):
         super().__init__(parent)
         self._source_path = ""
         self._icons_dir = Path(icons_dir) if icons_dir else None
@@ -49,11 +53,19 @@ class VideoView(QWidget):
         self._pause_icon = QIcon()
         self._volume_icon = QIcon()
         self._muted_icon = QIcon()
+        self._repeat_icon = QIcon()
+        self._repeat_on_icon = QIcon()
+        self._speed_down_icon = QIcon()
+        self._speed_up_icon = QIcon()
         if self._icons_dir is not None:
             self._play_icon = QIcon(str(self._icons_dir / "video_play.png"))
             self._pause_icon = QIcon(str(self._icons_dir / "video_pause.png"))
             self._volume_icon = QIcon(str(self._icons_dir / "video_volume.png"))
             self._muted_icon = QIcon(str(self._icons_dir / "video_muted.png"))
+            self._repeat_icon = QIcon(str(self._icons_dir / "video_repeat.png"))
+            self._repeat_on_icon = QIcon(str(self._icons_dir / "video_repeat_on.png"))
+            self._speed_down_icon = QIcon(str(self._icons_dir / "video_speed_down.png"))
+            self._speed_up_icon = QIcon(str(self._icons_dir / "video_speed_up.png"))
         self._duration = 0
         self._seeking = False
         self._paused_by_minimize = False
@@ -92,6 +104,43 @@ class VideoView(QWidget):
         self.time_label.setAlignment(Qt.AlignCenter)
         row.addWidget(self.time_label)
 
+        self.repeat_button = QToolButton(self.controls)
+        self.repeat_button.setObjectName("videoRepeatButton")
+        self.repeat_button.setCheckable(True)
+        self.repeat_button.setIconSize(QSize(24, 24))
+        self.repeat_button.clicked.connect(self._repeat_button_changed)
+        row.addWidget(self.repeat_button)
+
+        self.speed_down_button = QToolButton(self.controls)
+        self.speed_down_button.setObjectName("videoSpeedDownButton")
+        self.speed_down_button.setIconSize(QSize(24, 24))
+        if not self._speed_down_icon.isNull():
+            self.speed_down_button.setIcon(self._speed_down_icon)
+            self.speed_down_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        else:
+            self.speed_down_button.setText("«")
+            self.speed_down_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.speed_down_button.clicked.connect(lambda: self.step_playback_rate(-1))
+        row.addWidget(self.speed_down_button)
+
+        self.speed_label = QLabel("1×", self.controls)
+        self.speed_label.setObjectName("videoSpeedLabel")
+        self.speed_label.setMinimumWidth(44)
+        self.speed_label.setAlignment(Qt.AlignCenter)
+        row.addWidget(self.speed_label)
+
+        self.speed_up_button = QToolButton(self.controls)
+        self.speed_up_button.setObjectName("videoSpeedUpButton")
+        self.speed_up_button.setIconSize(QSize(24, 24))
+        if not self._speed_up_icon.isNull():
+            self.speed_up_button.setIcon(self._speed_up_icon)
+            self.speed_up_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        else:
+            self.speed_up_button.setText("»")
+            self.speed_up_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.speed_up_button.clicked.connect(lambda: self.step_playback_rate(1))
+        row.addWidget(self.speed_up_button)
+
         self.audio_button = QToolButton(self.controls)
         self.audio_button.setObjectName("videoAudioButton")
         self.audio_button.setCheckable(True)
@@ -119,7 +168,9 @@ class VideoView(QWidget):
 
         self.set_volume(volume, emit=False)
         self.set_audio_enabled(audio_enabled, emit=False)
+        self.set_repeat_enabled(repeat_enabled, emit=False)
         self.set_playback_rate(playback_rate)
+        self.retranslate_ui()
 
     @property
     def source_path(self):
@@ -149,14 +200,67 @@ class VideoView(QWidget):
             value = float(value)
         except (TypeError, ValueError):
             value = 1.0
-        value = max(0.25, min(4.0, value))
+        value = max(self.PLAYBACK_RATES[0], min(self.PLAYBACK_RATES[-1], value))
         self.player.setPlaybackRate(value)
+        if hasattr(self, "speed_label"):
+            self.speed_label.setText(f"{value:g}×")
+            self._update_speed_buttons(value)
+
+    def step_playback_rate(self, direction):
+        """Move one step through the same rates exposed by Tools > Video."""
+        direction = 1 if int(direction) > 0 else -1
+        current = self.playback_rate()
+        nearest = min(
+            range(len(self.PLAYBACK_RATES)),
+            key=lambda index: abs(self.PLAYBACK_RATES[index] - current),
+        )
+        target_index = max(0, min(len(self.PLAYBACK_RATES) - 1, nearest + direction))
+        target = self.PLAYBACK_RATES[target_index]
+        if abs(target - current) < 1e-9:
+            self._update_speed_buttons(target)
+            return
+        self.set_playback_rate(target)
+        self.playback_rate_changed.emit(target)
+
+    def _update_speed_buttons(self, value=None):
+        if value is None:
+            value = self.playback_rate()
+        minimum = self.PLAYBACK_RATES[0]
+        maximum = self.PLAYBACK_RATES[-1]
+        self.speed_down_button.setEnabled(value > minimum + 1e-9)
+        self.speed_up_button.setEnabled(value < maximum - 1e-9)
 
     def playback_rate(self):
         try:
             return float(self.player.playbackRate())
         except Exception:
             return 1.0
+
+    def set_repeat_enabled(self, enabled, *, emit=True):
+        enabled = bool(enabled)
+        self.repeat_button.blockSignals(True)
+        self.repeat_button.setChecked(enabled)
+        self._set_repeat_button_state(enabled)
+        self.repeat_button.blockSignals(False)
+        if emit:
+            self.repeat_changed.emit(enabled)
+
+    def repeat_enabled(self):
+        return bool(self.repeat_button.isChecked())
+
+    def _set_repeat_button_state(self, enabled):
+        icon = self._repeat_on_icon if enabled else self._repeat_icon
+        if not icon.isNull():
+            self.repeat_button.setIcon(icon)
+            self.repeat_button.setText("")
+            self.repeat_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        else:
+            self.repeat_button.setIcon(QIcon())
+            self.repeat_button.setText("↻✓" if enabled else "↻")
+            self.repeat_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.repeat_button.setToolTip(
+            tr("video.repeat_disable") if enabled else tr("video.repeat_enable")
+        )
 
     def set_audio_enabled(self, enabled, *, emit=True):
         enabled = bool(enabled)
@@ -248,6 +352,9 @@ class VideoView(QWidget):
         self.player.setSource(QUrl())
         self._source_path = ""
 
+    def _repeat_button_changed(self, checked):
+        self.set_repeat_enabled(bool(checked))
+
     def _audio_button_changed(self, checked):
         self.set_audio_enabled(bool(checked))
 
@@ -303,3 +410,6 @@ class VideoView(QWidget):
         playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         self.play_button.setToolTip(tr("video.pause") if playing else tr("video.play"))
         self.audio_button.setToolTip(tr("video.audio"))
+        self._set_repeat_button_state(self.repeat_enabled())
+        self.speed_down_button.setToolTip(tr("video.speed_slower"))
+        self.speed_up_button.setToolTip(tr("video.speed_faster"))

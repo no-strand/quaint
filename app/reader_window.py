@@ -1612,10 +1612,13 @@ class MainWindow(QMainWindow):
                 audio_enabled=self._video_audio_enabled,
                 volume=self._video_volume,
                 playback_rate=self._video_speed,
+                repeat_enabled=self._video_repeat,
                 icons_dir=self.icons_dir,
             )
             self.video_view.audio_enabled_changed.connect(self._on_video_audio_changed)
             self.video_view.volume_changed.connect(self._on_video_volume_changed)
+            self.video_view.repeat_changed.connect(self.set_video_repeat)
+            self.video_view.playback_rate_changed.connect(self.set_video_speed)
             self.video_view.playback_error.connect(self._on_video_playback_error)
             self.video_view.ended.connect(self._on_video_ended)
             self.stack.addWidget(self.video_view)
@@ -1693,6 +1696,21 @@ class MainWindow(QMainWindow):
         view.set_edge_to_edge(self._interface_hidden or self.isFullScreen())
         return view
 
+    def _is_epub_cover_page(self, index=None):
+        """Return True for the first image item used as the EPUB cover."""
+        if not self.archive or self.archive.kind != "epub" or self.archive.count() <= 0:
+            return False
+        idx = self.current_index if index is None else int(index)
+        return idx == 0 and not self.archive.is_text_page(idx)
+
+    def _show_epub_cover_spread(self, index):
+        from app.epub_view import epub_paper_color
+
+        view = self._ensure_double_view()
+        view.show_epub_cover(index, epub_paper_color(self.settings.epub_theme()))
+        self.stack.setCurrentWidget(view)
+        return view
+
     def _apply_mode_widget(self):
         if not self.archive:
             return
@@ -1718,6 +1736,8 @@ class MainWindow(QMainWindow):
                 view = self._ensure_epub_text_view()
                 view.set_mode("double" if self.mode == MODE_DOUBLE else "single")
                 self.stack.setCurrentWidget(view)
+            elif self.mode == MODE_DOUBLE and self._is_epub_cover_page(self.current_index):
+                self._show_epub_cover_spread(self.current_index)
             else:
                 self.stack.setCurrentWidget(self.single_view)
             return
@@ -1776,8 +1796,11 @@ class MainWindow(QMainWindow):
         self.act_direction.setText(tr("action.direction", direction=label))
         if hasattr(self, "double_view"):
             self.double_view.set_direction(self.direction)
-            if self.mode == MODE_DOUBLE and self.archive and not self.archive.has_text_pages() and self.archive.kind != "image":
-                self.double_view.show_spread(self.current_index, self.archive.count())
+            if self.mode == MODE_DOUBLE and self.archive:
+                if self._is_epub_cover_page(self.current_index):
+                    self._show_epub_cover_spread(self.current_index)
+                elif not self.archive.has_text_pages() and self.archive.kind != "image":
+                    self.double_view.show_spread(self.current_index, self.archive.count())
 
     def _set_fit(self, mode):
         self.fit_mode = mode
@@ -2370,6 +2393,9 @@ class MainWindow(QMainWindow):
         self.act_video_repeat.blockSignals(True)
         self.act_video_repeat.setChecked(enabled)
         self.act_video_repeat.blockSignals(False)
+        view = getattr(self, "video_view", None)
+        if view is not None and view.repeat_enabled() != enabled:
+            view.set_repeat_enabled(enabled, emit=False)
         if enabled and self._video_auto_advance:
             self._video_auto_advance = False
             self.settings.set("video_auto_advance", False)
@@ -2390,6 +2416,9 @@ class MainWindow(QMainWindow):
             self.act_video_repeat.blockSignals(True)
             self.act_video_repeat.setChecked(False)
             self.act_video_repeat.blockSignals(False)
+            view = getattr(self, "video_view", None)
+            if view is not None:
+                view.set_repeat_enabled(False, emit=False)
 
     def set_video_speed(self, value):
         try:
@@ -2599,9 +2628,17 @@ class MainWindow(QMainWindow):
             elif epub_position == "first":
                 epub_view.go_first()
             self.stack.setCurrentWidget(epub_view)
+        elif (
+            self.archive.kind == "epub"
+            and self.mode == MODE_DOUBLE
+            and self._is_epub_cover_page(index)
+        ):
+            # A capa agora participa visualmente do livro: ocupa uma folha do
+            # spread duplo, mas não é misturada com o primeiro capítulo textual.
+            self._show_epub_cover_spread(index)
         elif self.archive.has_text_pages() or self.archive.kind == "image":
-            # EPUB misto: imagens continuam isoladas; o spread duplo vale para
-            # os capítulos de texto e jamais mistura tipos diferentes.
+            # Demais imagens de EPUB misto continuam isoladas; somente a capa
+            # inicial ganha o tratamento de folha no modo de página dupla.
             self.stack.setCurrentWidget(self.single_view)
             self.single_view.show_page(index)
         elif self.mode == MODE_SINGLE:

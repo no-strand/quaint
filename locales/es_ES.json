@@ -514,5 +514,9 @@
   "menu.video_speed": "Velocidad",
   "dialog.save_video_frame": "Guardar fotograma actual",
   "video.frame_unavailable": "Todavía no hay un fotograma de vídeo disponible para guardar.",
-  "status.video_frame_saved": "Fotograma guardado en {path}"
+  "status.video_frame_saved": "Fotograma guardado en {path}",
+  "video.repeat_enable": "Repetir vídeo",
+  "video.repeat_disable": "Dejar de repetir el vídeo",
+  "video.speed_slower": "Disminuir velocidad del vídeo",
+  "video.speed_faster": "Aumentar velocidad del vídeo"
 }

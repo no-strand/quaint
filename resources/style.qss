@@ -460,14 +460,40 @@ QWidget#videoControls QToolButton {
     min-width: 30px;
     min-height: 26px;
 }
-QToolButton#videoPlayButton, QToolButton#videoAudioButton {
+QToolButton#videoPlayButton,
+QToolButton#videoAudioButton,
+QToolButton#videoRepeatButton,
+QToolButton#videoSpeedDownButton,
+QToolButton#videoSpeedUpButton {
     background: #eeeeee;
     border: 1px solid #d8d8dc;
     border-radius: 6px;
 }
-QToolButton#videoPlayButton:hover, QToolButton#videoAudioButton:hover {
+QToolButton#videoPlayButton:hover,
+QToolButton#videoAudioButton:hover,
+QToolButton#videoRepeatButton:hover,
+QToolButton#videoSpeedDownButton:hover,
+QToolButton#videoSpeedUpButton:hover {
     background: #ffffff;
 }
-QToolButton#videoPlayButton:pressed, QToolButton#videoAudioButton:pressed {
+QToolButton#videoPlayButton:pressed,
+QToolButton#videoAudioButton:pressed,
+QToolButton#videoRepeatButton:pressed,
+QToolButton#videoSpeedDownButton:pressed,
+QToolButton#videoSpeedUpButton:pressed {
     background: #dcdce2;
+}
+QToolButton#videoRepeatButton:checked {
+    background: #ffffff;
+    border-color: #bfc0c8;
+}
+QToolButton#videoSpeedDownButton:disabled,
+QToolButton#videoSpeedUpButton:disabled {
+    background: #cfcfd5;
+    border-color: #c3c3ca;
+}
+QLabel#videoSpeedLabel {
+    min-width: 40px;
+    padding: 0 3px;
+    font-weight: 600;
 }

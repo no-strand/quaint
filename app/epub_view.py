@@ -73,6 +73,12 @@ _THEME_PALETTE = {
 }
 
 
+def epub_paper_color(theme):
+    """Return the logical paper color used by paginated EPUB pages."""
+    theme = theme if theme in EPUB_THEMES else EPUB_THEME_LIGHT
+    return _THEME_PALETTE[theme]["paper"]
+
+
 def _epub_document_css(font_family, font_size, theme):
     palette = _THEME_PALETTE[theme if theme in EPUB_THEMES else EPUB_THEME_LIGHT]
     family = str(font_family or "Georgia").replace("'", "\\'")

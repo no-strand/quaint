@@ -402,6 +402,14 @@ class DoublePageView(_ZoomPanMixin, QScrollArea):
         self._source_pix_a = None
         self._source_pix_b = None
         self._prefetch_anchor = None
+        # EPUB cover mode: the cover is rendered *inside* a logical book page
+        # instead of floating as a standalone image.  This is deliberately
+        # local to the visible cover so ordinary CBZ/PDF/image spreads remain
+        # byte-for-byte on the previous rendering path.
+        self._epub_cover_index = None
+        self._epub_cover_paper_color = QColor("#ffffff")
+        self._epub_cover_page_cache = None
+        self._epub_cover_source_key = None
         self._resize_quality_timer = QTimer(self)
         self._resize_quality_timer.setSingleShot(True)
         self._resize_quality_timer.setInterval(85)
@@ -448,8 +456,48 @@ class DoublePageView(_ZoomPanMixin, QScrollArea):
             self._load(self.label_a, self.left_index, "right")
             self._load(self.label_b, self.right_index, "left")
 
+    def show_epub_cover(self, index, paper_color="#ffffff"):
+        """Show an EPUB cover as a real page inside the double-page layout.
+
+        The cover intentionally occupies one logical slot.  The opposite slot
+        stays empty, so advancing starts the next spread at the following EPUB
+        item instead of trying to mix an image cover with a text chapter.
+        """
+        index = int(index)
+        new_color = QColor(str(paper_color or "#ffffff"))
+        if index != self._epub_cover_index or new_color != self._epub_cover_paper_color:
+            self._epub_cover_page_cache = None
+            self._epub_cover_source_key = None
+        self._epub_cover_index = index
+        self._epub_cover_paper_color = new_color
+
+        # Keep the cover on the same visual side index 0 would occupy in the
+        # normal spread algorithm (LTR: left, RTL: right).
+        if self.direction == "rtl":
+            left, right = None, index
+        else:
+            left, right = index, None
+        self.left_index, self.right_index = left, right
+        archive = getattr(self.provider, "archive", None)
+        mixed_text_epub = bool(
+            archive is not None
+            and getattr(archive, "kind", None) == "epub"
+            and getattr(archive, "has_text_pages", lambda: False)()
+        )
+        # A mixed EPUB may have a text chapter immediately after the cover;
+        # PixmapProvider cannot preload text pages as images.
+        self._prefetch_anchor = None if mixed_text_epub else index
+        self.provider.retain_indices([index])
+        ready_a = self._load(self.label_a, left, "right")
+        ready_b = self._load(self.label_b, right, "left")
+        if ready_a or ready_b:
+            self._start_spread_prefetch()
+
     def show_spread(self, anchor_index, total):
         """Calcula e exibe o par de páginas que contém anchor_index."""
+        self._epub_cover_index = None
+        self._epub_cover_page_cache = None
+        self._epub_cover_source_key = None
         if anchor_index <= 0:
             a, b = 0, (1 if total > 1 else None)
         else:
@@ -520,25 +568,75 @@ class DoublePageView(_ZoomPanMixin, QScrollArea):
     def _apply(self, label, pix, edge, animated=False, fast=False):
         if label is self.label_a:
             self._source_pix_a = pix
+            logical_index = self.left_index
         elif label is self.label_b:
             self._source_pix_b = pix
+            logical_index = self.right_index
+        else:
+            logical_index = None
+
+        display_pix = pix
+        if logical_index is not None and logical_index == self._epub_cover_index:
+            display_pix = self._epub_cover_page_pixmap(pix)
+
         margin = 0 if (self._edge_to_edge or self.layout_mode == LAYOUT_FULL_WIDTH) else 20
         avail_h = max(self.viewport().height() - margin, 100)
         avail_w = max(self.viewport().width() // 2 - margin - self.gutter.width() // 2, 100)
         transform = Qt.FastTransformation if (animated or fast) else Qt.SmoothTransformation
         if self._manual_zoom_percent is not None:
             factor = self._manual_zoom_percent / 100.0
-            target = QSize(max(1, int(pix.width() * factor)), max(1, int(pix.height() * factor)))
-            scaled = pix.scaled(target, Qt.KeepAspectRatio, transform)
+            target = QSize(
+                max(1, int(display_pix.width() * factor)),
+                max(1, int(display_pix.height() * factor)),
+            )
+            scaled = display_pix.scaled(target, Qt.KeepAspectRatio, transform)
         elif self.layout_mode == LAYOUT_FULL_WIDTH:
-            scaled = pix.scaledToWidth(avail_w, transform)
+            scaled = display_pix.scaledToWidth(avail_w, transform)
         else:
-            scaled = pix.scaled(avail_w, avail_h, Qt.KeepAspectRatio, transform)
+            scaled = display_pix.scaled(avail_w, avail_h, Qt.KeepAspectRatio, transform)
         if self.gutter.enabled:
             scaled = self._shade_spine_edge(scaled, edge)
         label.setPixmap(scaled)
         if self._manual_zoom_percent is not None:
             self._resize_manual_container()
+
+    def _epub_cover_page_pixmap(self, cover):
+        """Place the cover inside a lightweight fixed-ratio EPUB paper sheet."""
+        if cover is None or cover.isNull():
+            return cover
+
+        source_key = int(cover.cacheKey())
+        if (
+            self._epub_cover_page_cache is not None
+            and not self._epub_cover_page_cache.isNull()
+            and self._epub_cover_source_key == source_key
+        ):
+            return self._epub_cover_page_cache
+
+        # Same 3:4 logical ratio used by the textual EPUB reader (720x960),
+        # but kept modest in pixels so the wrapper does not inflate memory.
+        page_w, page_h = 900, 1200
+        framed = QPixmap(page_w, page_h)
+        framed.fill(self._epub_cover_paper_color)
+
+        inset = 24
+        target_w = page_w - inset * 2
+        target_h = page_h - inset * 2
+        fitted = cover.scaled(
+            target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+        x = (page_w - fitted.width()) // 2
+        y = (page_h - fitted.height()) // 2
+        painter = QPainter(framed)
+        painter.drawPixmap(x, y, fitted)
+        # A subtle border makes the paper boundary readable on light canvas
+        # without changing the cover itself.
+        painter.setPen(QColor(0, 0, 0, 38))
+        painter.drawRect(0, 0, page_w - 1, page_h - 1)
+        painter.end()
+        self._epub_cover_source_key = source_key
+        self._epub_cover_page_cache = framed
+        return framed
 
     def _resize_manual_container(self):
         if self._manual_zoom_percent is None:
